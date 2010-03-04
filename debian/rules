@@ -1,0 +1,57 @@
+#!/usr/bin/make -f
+
+# Figure out the git branch we're on
+branch = $(shell git symbolic-ref HEAD 2>/dev/null | sed s:refs/heads/::)
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	dh_auto_install
+	install -D -m755 debian/makedumpfile-static.initramfs-hook \
+	  debian/makedumpfile-static/usr/share/initramfs-tools/hooks/makedumpfile
+
+override_dh_installinit:
+	# Start right after syslog is available, and don't bother stopping
+	# (which just unloads the kdump kernel) so that we can catch crashes
+	# all the way until actual shutdown.
+	dh_installinit -pkdump-tools -- start 11 2 3 4 5 .
+
+# The upstream Makefile modifies makedumpfile.8 in place, so without this hack
+# (or a patch to the Makefile, which would be harder to maintain), our clean
+# target won't get us back to the original source.
+override_dh_auto_build:
+	cp makedumpfile.8 makedumpfile.8.orig
+	dh_auto_build
+
+override_dh_auto_clean:
+	if [ -f makedumpfile.8.orig ]; then \
+		mv makedumpfile.8.orig makedumpfile.8; \
+	fi
+	dh_auto_clean
+
+guilt-patches:
+	dh_testdir
+	dh_quilt_unpatch
+	test -d .git
+	test -n '$(branch)'
+
+	# Make sure no guilt patches are applied.  But don't fail if guilt
+	# hasn't been initialized yet.
+	guilt status > /dev/null || guilt init
+	guilt pop -a
+
+	rm -rf .git/patches/$(branch)
+	rsync -av --delete debian/patches/ .git/patches/$(branch)
+	touch .git/patches/$(branch)/status
+
+debian/patches:
+	dh_testdir
+	dh_quilt_unpatch
+	test -d .git
+
+	guilt pop -a
+	rm -rf debian/patches
+	guilt export debian/patches
+
+.PHONY: guilt-patches debian/patches

@@ -1,0 +1,4 @@
+use-install-in-makefile.patch
+build-static-and-dynamic-binaries.patch
+support-linux-2.6.32.patch
+upstream/4a16bd-fix-buffer-overflow-when-writing-dh-signature.patch
