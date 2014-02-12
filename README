@@ -6,13 +6,13 @@
 * REQUIREMENTS
   Please download the following library file and install it exactly as below;
   do NOT use "make install".
-  - elfutils-0.125.tar.gz
+  - elfutils-0.137.tar.gz
     The "make install" of elfutils installs some commands (ld, readelf, etc.),
     and compiling problems sometimes happen due to using the installed
     commands. To install only the library & header files, use the following
     method:
-     # tar -zxvf elfutils-0.125.tar.gz
-     # cd elfutils-0.125
+     # tar -zxvf elfutils-0.137.tar.gz
+     # cd elfutils-0.137
      # ./configure
      # make
      #
@@ -37,33 +37,49 @@
     # cd makedumpfile-x.y.z
   4.Build, and install:
     # make; make install
+  5.Build for a different architecture than the host :
+    # make TARGET=<arch> ; make install
+    where <arch> is the 'uname -m' of the target architecture. 
+    The user has to set the environment variable CC to appropriate
+    compiler for the target architecture.
 
 * SUPPORTED KERNELS
   This makedumpfile supports the following kernels.
 
-         |      FLATMEM      |   DISCONTIGMEM    |     SPARSEMEM
-         |-------------------+-------------------+-------------------
-   Kernel|    | x86|    | PPC|    | x86|    | PPC|    | x86|    | PPC
-  Version| x86| _64|ia64|  64| x86| _64|ia64|  64| x86| _64|ia64|  64
-  -------+----+----+----+----+----+----+----+----+----+----+----+----
-  2.6.15 | OK | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --
-  2.6.16 | OK | OK | -- |    | -- | OK | OK | -- | -- |    | -- |
-  2.6.17 | OK | OK | -- |    | -- | OK | -- | -- | -- | OK | -- |
-  2.6.18 | OK | OK | -- | OK | -- | OK | OK | -- | -- | OK | OK | OK
-  2.6.19 | OK | OK | -- | OK | OK | OK |    | -- | OK | OK | OK | OK
-  2.6.20 | OK | OK | -- | #1 | OK | OK | OK | -- | OK | OK | OK | #1
-  21-rc5 | OK | OK | -- | OK | OK | OK | OK | -- | OK | OK | OK | OK
-  2.6.21 | OK | OK | -- |    | OK | OK | OK | -- | OK | OK | OK | 
-  2.6.22 | OK | OK | -- |    | OK | OK | OK | -- | OK | OK | OK | 
-  2.6.23 | OK | OK | -- |    | OK | OK | OK | -- | OK | OK | OK | 
-  2.6.24 | OK | OK | -- |    | OK | OK | OK | -- | OK | OK | OK | 
-  2.6.25 | OK | ** | -- |    |    | ** | OK | -- | OK | OK | OK | 
-  2.6.26 | OK | ** | -- |    |    | ** | OK | -- | OK | OK | OK | 
-  2.6.27 | OK | ** | -- |    |    | ** | OK | -- | #2 | OK | OK | 
-  2.6.28 | OK | ** | -- |    |    | ** | OK | -- | OK | OK | OK | 
-  2.6.29 | OK | ** | -- |    |    | ** | OK | -- | OK | OK | OK | 
-  2.6.30 | OK | ** | -- |    |    | ** | OK | -- | OK | OK | OK | 
-  2.6.31 | OK | ** | -- |    |    | ** |    | -- |    | OK | OK | 
+         |       FLATMEM     |   DISCONTIGMEM    |       SPARSEMEM       
+         |-------------------+-------------------+------------------------
+   Kernel|    | x86| PPC| PPC|    | x86|    | PPC|    | x86|    | PPC|
+  Version| x86| _64|  32|  64| x86| _64|ia64|  64| x86| _64|ia64|  64|s390
+  -------+----+----+----+----+----+----+----+----+----+----+----+----+----
+  2.6.15 | OK | -- |    | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+  2.6.16 | OK | OK |    |    | -- | OK | OK | -- | -- |    | -- |    |
+  2.6.17 | OK | OK |    |    | -- | OK | -- | -- | -- | OK | -- |    |
+  2.6.18 | OK | OK |    | OK | -- | OK | OK | -- | -- | OK | OK | OK |
+  2.6.19 | OK | OK |    | OK | OK | OK |    | -- | OK | OK | OK | OK |
+  2.6.20 | OK | OK |    | #1 | OK | OK | OK | -- | OK | OK | OK | #1 |
+  21-rc5 | OK | OK |    | OK | OK | OK | OK | -- | OK | OK | OK | OK |
+  2.6.21 | OK | OK |    |    | OK | OK | OK | -- | OK | OK | OK |    |
+  2.6.22 | OK | OK |    |    | OK | OK | OK | -- | OK | OK | OK |    |
+  2.6.23 | OK | OK |    |    | OK | OK | OK | -- | OK | OK | OK |    |
+  2.6.24 | OK | OK |    |    | OK | OK | OK | -- | OK | OK | OK |    |
+  2.6.25 | OK | ** |    |    |    | ** | OK | -- | OK | OK | OK |    |
+  2.6.26 | OK | ** |    |    |    | ** | OK | -- | OK | OK | OK |    |
+  2.6.27 | OK | ** |    |    |    | ** | OK | -- | #2 | OK | OK |    |
+  2.6.28 | OK | ** |    |    |    | ** | OK | -- | OK | OK | OK |    |
+  2.6.29 | OK | ** |    |    |    | ** | OK | -- | OK | OK | OK |    |
+  2.6.30 | OK | ** |    |    |    | ** | OK | -- | OK | OK | OK |    |
+  2.6.31 | OK | ** |    |    |    | ** |    | -- | OK | OK | OK |    |
+  2.6.32 | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    | OK
+  2.6.33 | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+  2.6.34 | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+  2.6.35 | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+  2.6.36 | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+  2.6.37 | OK | ** |    |    |    | ** |    | -- |    | OK |    |    |
+  2.6.38 | OK | ** |    |    |    | ** |    | -- |    | OK |    |    |
+  2.6.39 | OK | ** |    |    |    | ** |    | -- |    | OK |    |    |
+  3.0    | OK | ** |    |    |    | ** |    | -- |    | OK |    |    |
+  3.1    |    | ** |    |    |    | ** |    | -- |    |    |    |    |
+  3.2    |    | ** | OK |    |    | ** |    | -- |    |    |    |    |
 
   OK    : Support.
   --    : Not support.
@@ -104,31 +120,29 @@
      option for excluding Xen user domain pages.
 
 * FAQ
-  001: It cannot be compiled with the following messages:
-    # make
-    gcc -g -O2 -Wall -D__x86_64__ -c -o ./x86.o ./x86.c
-    gcc -g -O2 -Wall -D__x86_64__ -c -o ./x86_64.o ./x86_64.c
-    gcc -g -O2 -Wall -D__x86_64__ -c -o ./ia64.o ./ia64.c
-    gcc -g -O2 -Wall -D__x86_64__ -c -o ./ppc64.o ./ppc64.c
-    gcc -g -O2 -Wall -D_FILE_OFFSET_BITS=64 -DVERSION='"1.1.4"'
-    -DRELEASE_DATE='"08 June 2007"' -D__x86_64__ x86.o x86_64.o ia64.o
-    ppc64.o-o makedumpfile
-    makedumpfile.c -static -ldw -lelf -lz
-    /tmp/ccYv3cGF.o: In function `get_debug_info':
-    /tmp/makedumpfile/makedumpfile.c:1341: undefined reference to
-    `elf_getshstrndx'
-    collect2: ld returned 1 exit status
-    make: *** [makedumpfile] Error 1
-    #
+  001: If installing elfutils-0.137 into older elfutils by the above way, the
+       following problem happens sometimes. If seeing, try to enable LDFLAGS
+       comment (-L/usr/local/lib -I/usr/local/include) in Makefile.
 
-    The compiler cannot find elf_getshstrndx() because it tries
-    searching for it only from /usr/lib/libelf.a though elf_getshstrndx()
-    is archived in /usr/local/lib/libelf.a.
-    To solve the problem, add the option (-L/usr/local/lib/) to CFLAGS
-    of Makefile like the following:
+       $ make
+       [..]
+       /tmp/ccXQtvnZ.o: In function `process_module':
+       /makedumpfile/makedumpfile.c:1387: undefined reference to `dwarf_getelf'
+       collect2: ld returned 1 exit status
+       make: *** [makedumpfile] Error 1
 
-    CFLAGS = -g -O2 -Wall -D_FILE_OFFSET_BITS=64 -L/usr/local/lib/ \
-        -DVERSION='"$(VERSION)"' -DRELEASE_DATE='"$(DATE)"'
+  002: makedumpfile is compiled with -static option, because the command should
+       run while the second kernel, which may not mount root filesystem and may
+       not contain dynamic library files, is running.
+       If the dynamic library files, which are needed by makedumpfile, exist
+       while the second kernel is running, we can use dynamic libraries by 
+       "LINKTYPE" parameter. 
+
+       $ make LINKTYPE=dynamic
+
+       This is a workaround for some linux distributions which does
+       not contain static library files needed by makedumpfile.
+
 
 * REFERENCES
   https://sourceforge.net/projects/makedumpfile/
@@ -137,7 +151,9 @@
 
 * BUG REPORT
   If finding some bugs, please send the information to the following:
-  Ken'ichi Ohmichi <oomichi@mxs.nes.nec.co.jp>
   Masaki Tachibana <tachibana@mxm.nes.nec.co.jp>
+  Minoru Usui <usui@mxm.nes.nec.co.jp>
+  Daisuke Nishimura <nishimura@mxp.nes.nec.co.jp>
+  Atsushi Kumagai <kumagai-atsushi@mxc.nes.nec.co.jp>
   kexec-ml <kexec@lists.infradead.org>
 
