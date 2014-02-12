@@ -146,16 +146,10 @@ configuration file and set
 .IR crashkernel = 
 command line parameter.  Some example crashkernel parameters:
 .nf
-    ia64:       \fIcrashkernel=384M@256M\fR
-    x86:        \fIcrashkernel=64M@16M\fR
-    x86_64:     \fIcrashkernel=128M@16M\fR
+    ia64:       \fIcrashkernel=384M\fR
+    x86:        \fIcrashkernel=128M\fR
+    x86_64:     \fIcrashkernel=256M\fR
 .fi
-
-If these don't work, you can find a free section of memory by examining
-.IR /proc/iomem .
-A good choice is probably in the same (usually very large) area of
-System RAM that contains the kernel code, data, and bss, starting at an
-address above all the kernel stuff.
 
 Some users may also want to add 
 .I nmi_watchdog=1 
@@ -163,10 +157,11 @@ on certain systems.  The nmi watchdog will cause the kernel to panic
 (and kdump) if a system hang is detected.
 
 The kernel command line parameter is generally set in one of these files:
-.IR /etc/lilo.conf , 
-.I /etc/elilo.conf
-or 
-.IR /boot/grub/menu.lst .
+.IR /etc/default/grub ,
+.IR /boot/grub/menu.lst ,
+.IR /etc/elilo.conf ,
+or
+.IR /etc/lilo.conf .
 If the command line parameter is changed, a reboot is required in
 order for it to take effect.
 .\"

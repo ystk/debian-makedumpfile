@@ -45,7 +45,6 @@ case "$1" in
 	else
 		echo -n "Starting $DESC: "
 		$KDUMP_SCRIPT load
-		exit $?
 	fi
 	;;
   stop)
@@ -59,10 +58,9 @@ case "$1" in
   	# alias the required 'force-reload' option
 	$KDUMP_SCRIPT unload
 	$KDUMP_SCRIPT load
-	exit $?
 	;;
   *)
-	echo $"Usage: $0 {start|stop|status|restart|force-reload}"
+	echo "Usage: $0 {start|stop|status|restart|force-reload}"
 	exit 1
 esac
 

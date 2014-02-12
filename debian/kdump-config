@@ -191,6 +191,10 @@ function locate_debug_kernel()
 		fi
 
 	# 2: Look for an installed debug kernel
+	elif [ -e /usr/lib/debug/boot/vmlinux-$KVER ] ; then
+		DEBUG_KERNEL=/usr/lib/debug/boot/vmlinux-$KVER
+		DEBUG_CONFIG=/boot/config-$KVER
+		DEBUG_MAP=/boot/System.map-$KVER
 	elif [ -e /usr/lib/debug/vmlinux-$KVER ] ; then
 		DEBUG_KERNEL=/usr/lib/debug/vmlinux-$KVER
 		DEBUG_CONFIG=/usr/lib/debug/config-$KVER
@@ -200,9 +204,9 @@ function locate_debug_kernel()
 
 	# 3: give up :)
 	else
-		log_failure_msg "could not find an installed debug vmlinux image and"
-		log_failure_msg "DEBUG_KERNEL is not specified in $KDUMP_DEFAULTS"
-		log_failure_msg "Warning: makedumpfile will be limited to -d 1."
+		echo "Could not find an installed debug vmlinux image and"
+		echo "DEBUG_KERNEL is not specified in $KDUMP_DEFAULTS"
+		log_warning_msg "makedumpfile may be limited to -d 1"
 		return 1;
 	fi
 
@@ -318,9 +322,8 @@ function kdump_load()
 	# Assemble the --commmand-line:
 	if [ -z "$KDUMP_CMDLINE" ] ; then
 		KDUMP_CMDLINE=`cat /proc/cmdline | \
-        	sed -e 's/crashkernel=[^ $]*//' \
-        	    -e 's/ abm=[^ $]*//' \
-        	    -e 's/^abm=[^ $]*//'`
+		sed -r -e 's/(^| )crashkernel=[^ ]*//g' \
+		       -e 's/(^| )abm=[^ ]*//g'`
 	fi
 	KDUMP_CMDLINE="$KDUMP_CMDLINE $KDUMP_CMDLINE_APPEND"
 	KEXEC_CMD="$KEXEC_CMD --command-line=\"$KDUMP_CMDLINE\""

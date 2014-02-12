@@ -2,8 +2,9 @@ Source: makedumpfile
 Section: devel
 Priority: optional
 Maintainer: John Wright <jsw@debian.org>
+Uploaders: Louis Bouchard <louis@ubuntu.com>
 Standards-Version: 3.8.2
-Build-Depends: debhelper (>= 7.0.50), libelf-dev, libz-dev, libdw-dev (>= 0.141-2ubuntu1)
+Build-Depends: debhelper (>= 7.0.50), libelf-dev, libz-dev, libdw-dev (>= 0.141-2ubuntu1), libbz2-dev
 Vcs-Git: git://git.debian.org/collab-maint/makedumpfile.git
 Vcs-Browser: http://git.debian.org/?p=collab-maint/makedumpfile.git;a=summary
 
@@ -17,19 +18,6 @@ Description: VMcore extraction tool
  via /dev/mem or /proc/vmcore (for crashdumps). It is used to get memory
  images without extra uneeded information (zero pages, userspace programs,
  etc).
-
-Package: makedumpfile-static
-Architecture: i386 amd64 powerpc ia64 lpia
-Depends: ${shlibs:Depends}, ${misc:Depends}, ${perl:Depends}
-Recommends: crash, kexec-tools
-Description: VMcore extraction tool - static binary
- This program is used to extract a subset of the memory available either
- via /dev/mem or /proc/vmcore (for crashdumps). It is used to get memory
- images without extra uneeded information (zero pages, userspace programs,
- etc).
- .
- This version is statically linked, so that it can be used in an
- initramfs or other environment where not all libraries are available.
 
 Package: kdump-tools
 Architecture: all
