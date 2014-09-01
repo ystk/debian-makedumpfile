@@ -33,17 +33,31 @@ void
 print_usage(void)
 {
 	MSG("\n");
+	MSG("LZO support:\n");
+#ifdef USELZO
+	MSG("  enabled\n");
+#else
+	MSG("  disabled ('-l' option will be ignored.)\n");
+#endif
+	MSG("snappy support:\n");
+#ifdef USESNAPPY
+	MSG("  enabled\n");
+#else
+	MSG("  disabled ('-p' option will be ignored.)\n");
+#endif
+	MSG("\n");
 	MSG("Usage:\n");
 	MSG("  Creating DUMPFILE:\n");
-	MSG("  # makedumpfile    [-c|-E] [-d DL] [-x VMLINUX|-i VMCOREINFO] VMCORE DUMPFILE\n");
-	MSG("\n");
-	MSG("  Creating DUMPFILE with filtered kernel data specified through filter config\n");
-	MSG("  file:\n");
-	MSG("  # makedumpfile    [-c|-E] [-d DL] -x VMLINUX --config FILTERCONFIGFILE VMCORE\n");
+	MSG("  # makedumpfile    [-c|-l|-E] [-d DL] [-x VMLINUX|-i VMCOREINFO] VMCORE\n");
 	MSG("    DUMPFILE\n");
 	MSG("\n");
+	MSG("  Creating DUMPFILE with filtered kernel data specified through filter config\n");
+	MSG("  file or eppic macro:\n");
+	MSG("  # makedumpfile    [-c|-l|-E] [-d DL] -x VMLINUX [--config FILTERCONFIGFILE]\n");
+	MSG("    [--eppic EPPICMACRO] VMCORE DUMPFILE\n");
+	MSG("\n");
 	MSG("  Outputting the dump data in the flattened format to the standard output:\n");
-	MSG("  # makedumpfile -F [-c|-E] [-d DL] [-x VMLINUX|-i VMCOREINFO] VMCORE\n");
+	MSG("  # makedumpfile -F [-c|-l|-E] [-d DL] [-x VMLINUX|-i VMCOREINFO] VMCORE\n");
 	MSG("\n");
 	MSG("  Rearranging the dump data in the flattened format to a readable DUMPFILE:\n");
 	MSG("  # makedumpfile -R DUMPFILE\n");
@@ -70,15 +84,15 @@ print_usage(void)
 	MSG("\n");
 	MSG("\n");
 	MSG("  Creating DUMPFILE from multiple VMCOREs generated on sadump diskset configuration:\n");
-	MSG("  # makedumpfile [-c] [-d DL] -x VMLINUX --diskset=VMCORE1 --diskset=VMCORE2\n");
+	MSG("  # makedumpfile [-c|-l] [-d DL] -x VMLINUX --diskset=VMCORE1 --diskset=VMCORE2\n");
 	MSG("    [--diskset=VMCORE3 ..] DUMPFILE\n");
 	MSG("\n");
 	MSG("\n");
 	MSG("Available options:\n");
-	MSG("  [-c]:\n");
-	MSG("      Compress dump data by each page.\n");
-	MSG("      A user cannot specify this option with -E option, because the ELF format\n");
-	MSG("      does not support compressed data.\n");
+	MSG("  [-c|-l|-p]:\n");
+	MSG("      Compress dump data by each page using zlib for -c option, lzo for -l option\n");
+	MSG("      or snappy for -p option. A user cannot specify either of these options with\n");
+	MSG("      -E option, because the ELF format does not support compressed data.\n");
 	MSG("      THIS IS ONLY FOR THE CRASH UTILITY.\n");
 	MSG("\n");
 	MSG("  [-d DL]:\n");
@@ -103,8 +117,8 @@ print_usage(void)
 	MSG("\n");
 	MSG("  [-E]:\n");
 	MSG("      Create DUMPFILE in the ELF format.\n");
-	MSG("      This option cannot be specified with -c option, because the ELF\n");
-	MSG("      format does not support compressed data.\n");
+	MSG("      This option cannot be specified with either of -c option or -l option,\n");
+	MSG("      because the ELF format does not support compressed data.\n");
 	MSG("\n");
 	MSG("  [-x VMLINUX]:\n");
 	MSG("      Specify the first kernel's VMLINUX to analyze the first kernel's\n");
@@ -131,6 +145,13 @@ print_usage(void)
 	MSG("      file that contains filter commands to filter out desired kernel data\n");
 	MSG("      from vmcore while creating DUMPFILE.\n");
 	MSG("\n");
+	MSG("  [--eppic EPPICMACRO]:\n");
+	MSG("      Used in conjunction with -x VMLINUX option, to specify the eppic macro\n");
+	MSG("      file that contains filter rules or directory that contains eppic macro\n");
+	MSG("      files to filter out desired kernel data from vmcore while creating DUMPFILE.\n");
+	MSG("      When directory is specified, all the eppic macros in the directory are\n");
+	MSG("      processed\n");
+	MSG("\n");
 	MSG("  [-F]:\n");
 	MSG("      Output the dump data in the flattened format to the standard output\n");
 	MSG("      for transporting the dump data by SSH.\n");
@@ -153,6 +174,23 @@ print_usage(void)
 	MSG("  [--reassemble]:\n");
 	MSG("      Reassemble multiple DUMPFILEs, which are created by --split option,\n");
 	MSG("      into one DUMPFILE. dumpfile1 and dumpfile2 are reassembled into dumpfile.\n");
+	MSG("\n");
+	MSG("  [--cyclic-buffer BUFFER_SIZE]:\n");
+	MSG("      Specify the buffer size in kilo bytes for analysis in the cyclic mode.\n");
+	MSG("      Actually, the double of BUFFER_SIZE kilo bytes will be allocated in memory.\n");
+	MSG("      In the cyclic mode, the number of cycles is represented as:\n");
+	MSG("\n");
+	MSG("          num_of_cycles = system_memory / \n");
+	MSG("                          (BUFFER_SIZE * 1024 * bit_per_bytes * page_size)\n");
+	MSG("\n");
+	MSG("      The lesser number of cycles, the faster working speed is expected.\n");
+	MSG("      By default, BUFFER_SIZE will be calculated automatically depending on\n");
+	MSG("      system memory size, so ordinary users don't need to specify this option.\n");
+	MSG("\n");
+	MSG("  [--non-cyclic]:\n");
+	MSG("      Running in the non-cyclic mode, this mode uses the old filtering logic\n");
+	MSG("      same as v1.4.4 or before.\n");
+	MSG("      If you feel the cyclic mode is too slow, please try this mode.\n");
 	MSG("\n");
 	MSG("  [--xen-syms XEN-SYMS]:\n");
 	MSG("      Specify the XEN-SYMS to analyze Xen's memory usage.\n");
@@ -214,7 +252,7 @@ print_usage(void)
 	MSG("      Overwrite DUMPFILE even if it already exists.\n");
 	MSG("\n");
 	MSG("  [-h]:\n");
-	MSG("      Show help message.\n");
+	MSG("      Show help message and LZO/snappy support status (enabled/disabled).\n");
 	MSG("\n");
 	MSG("  [-b <order>]\n");
 	MSG("      Specify the cache 2^order pages in ram when generating vmcore info\n");

@@ -1,4 +1,4 @@
-.TH MAKEDUMPFILE 8 "29 February 2012" "makedumpfile v1.4.3" "Linux System Administrator's Manual"
+.TH MAKEDUMPFILE 8 "19 Feb 2013" "makedumpfile v1.5.3" "Linux System Administrator's Manual"
 .SH NAME
 makedumpfile \- make a small dumpfile of kdump
 .SH SYNOPSIS
@@ -6,7 +6,7 @@ makedumpfile \- make a small dumpfile of kdump
 .br
 \fBmakedumpfile\fR \-F [\fIOPTION\fR] [\-x \fIVMLINUX\fR|\-i \fIVMCOREINFO\fR] \fIVMCORE\fR
 .br
-\fBmakedumpfile\fR   [\fIOPTION\fR] \-x \fIVMLINUX\fR \-\-config \fIFILTERCONFIGFILE\fR \fIVMCORE\fR \fIDUMPFILE\fR
+\fBmakedumpfile\fR   [\fIOPTION\fR] \-x \fIVMLINUX\fR [\-\-config \fIFILTERCONFIGFILE\fR] [\-\-eppic \fIEPPICMACRO\fR] \fIVMCORE\fR \fIDUMPFILE\fR
 .br
 \fBmakedumpfile\fR \-R \fIDUMPFILE\fR
 .br
@@ -70,6 +70,15 @@ filter commands. The memory locations that require to be filtered out are
 then poisoned with character 'X' (58 in Hex). Refer to
 \fBmakedumpfile.conf(5)\fR for file format.
 .PP
+Eppic macros can also be used to specify kernel symbols and its members that
+need to be filtered. Eppic provides C semantics including language constructs
+such as conditional statements, logical and arithmetic operators, functions,
+nested loops to traverse and erase kernel data. --eppic requires
+\fBeppic_makedumpfile.so\fR and eppic library. \fBeppic_makedumpfile.so\fR
+can be built from makedumpfile source. Refer to
+\fBhttp://code.google.com/p/eppic/\fR to build eppic library \fBlibeppic.a\fR
+and for more information on writing eppic macros.
+.PP
 To analyze the first kernel's memory usage, makedumpfile can refer to
 \fIVMCOREINFO\fR instead of \fIVMLINUX\fR. \fIVMCOREINFO\fR contains the first
 kernel's information (structure size, field offset, etc.), and \fIVMCOREINFO\fR
@@ -121,8 +130,10 @@ configuration, you need to use --diskset option.
 .SH OPTIONS
 
 .TP
-\fB\-c\fR
-Compress dump data by each page.
+\fB\-c,\-l,\-p\fR
+Compress dump data by each page using zlib for -c option, lzo for -l
+option or snappy for -p option.
+(-l option needs USELZO=on and -p option needs USESNAPPY=on when building)
 .br
 A user cannot specify this option with \-E option, because the ELF format does
 not support compressed data.
@@ -196,8 +207,8 @@ by dump_level 11, makedumpfile retries it by dump_level 31.
 \fB\-E\fR
 Create \fIDUMPFILE\fR in the ELF format.
 .br
-This option cannot be specified with \-c option, because the ELF format does not
-support compressed data.
+This option cannot be specified with either of \-c option or \-l option, because
+the ELF format does not support compressed data.
 .br
 .B Example:
 .br
@@ -261,6 +272,13 @@ Used in conjunction with \-x \fIVMLINUX\fR option, to specify the filter
 config file \fIFILTERCONFIGFILE\fR that contains erase commands to filter out
 desired kernel data from vmcore while creating \fIDUMPFILE\fR. For filter
 command syntax please refer to \fBmakedumpfile.conf(5)\fR.
+
+.TP
+\fB\-\-eppic\fR \fIEPPICMACRO\fR
+Used in conjunction with \-x \fIVMLINUX\fR option, to specify the eppic macro
+file that contains filter rules or directory that contains eppic macro
+files to filter out desired kernel data from vmcore while creating \fIDUMPFILE\fR.
+When directory is specified, all the eppic macros in the directory are processed.
 
 .TP
 \fB\-F\fR
@@ -344,6 +362,32 @@ on the following example.
 .B Example:
 .br
 # makedumpfile \-\-reassemble dumpfile1 dumpfile2 dumpfile
+
+.TP
+\fB\-\-cyclic\-buffer\fR \fIbuffer_size\fR
+Specify the buffer size in kilo bytes for analysis in the cyclic mode.
+Actually, the double of \fIbuffer_size\fR kilo bytes will be allocated in memory.
+In the cyclic mode, the number of cycles is represented as:
+
+    num_of_cycles = system_memory / (\fIbuffer_size\fR * 1024 * bit_per_bytes * page_size )
+
+The lesser number of cycles, the faster working speed is expected.
+By default, \fIbuffer_size\fR will be calculated automatically depending on system memory
+size, so ordinary users don't need to specify this option.
+
+.br
+.B Example:
+.br
+# makedumpfile \-\-cyclic\-buffer 1024 \-d 31 \-x vmlinux /proc/vmcore dumpfile
+
+.TP
+\fB\-\-non\-cyclic\fR
+Running in the non-cyclic mode, this mode uses the old filtering logic same as v1.4.4 or before.
+If you feel the cyclic mode is too slow, please try this mode.
+.br
+.B Example:
+.br
+# makedumpfile \-\-non\-cyclic \-d 31 \-x vmlinux /proc/vmcore dumpfile
 
 .TP
 \fB\-\-xen-syms\fR \fIXEN-SYMS\fR
@@ -491,7 +535,7 @@ Print debugging message.
 
 .TP
 \fB\-h\fR
-Show help message.
+Show help message and LZO/snappy support status (enabled/disabled).
 
 .TP
 \fB\-v\fR
@@ -501,12 +545,12 @@ Show the version of makedumpfile.
 
 .TP 8
 .B TMPDIR
-This environment variable is for a temporary memory bitmap file.
-If your machine has a lots of memory and you use tmpfs on /tmp, makedumpfile 
-can fail for a little memory in the 2nd kernel because makedumpfile makes a 
-very large temporary memory bitmap file in this case. To avoid this failure, 
-you can set a TMPDIR environment variable. If you do not set a TMPDIR 
-environment variable, makedumpfile uses /tmp directory for a temporary 
+This environment variable is for a temporary memory bitmap file only in the non-cyclic mode.
+If your machine has a lots of memory and you use tmpfs on /tmp, makedumpfile
+can fail for a little memory in the 2nd kernel because makedumpfile makes a
+very large temporary memory bitmap file in this case. To avoid this failure,
+you can set a TMPDIR environment variable. If you do not set a TMPDIR
+environment variable, makedumpfile uses /tmp directory for a temporary
 bitmap file as a default.
 
 .SH DIAGNOSTICS

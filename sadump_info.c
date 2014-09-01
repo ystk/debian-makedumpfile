@@ -46,7 +46,7 @@
 			  KEXEC_CORE_NOTE_DESC_BYTES )
 
 #define for_each_online_cpu(cpu)					\
-	for (cpu = 0; cpu < BITPERBYTE * si->cpumask_size; ++cpu)	\
+	for (cpu = 0; cpu < max_mask_cpu(); ++cpu)	\
 		if (is_online_cpu(cpu))
 
 enum {
@@ -95,6 +95,7 @@ static int read_sadump_header_diskset(int diskid, struct sadump_diskset_info *sd
 static unsigned long long pfn_to_block(unsigned long long pfn);
 static int lookup_diskset(unsigned long long whole_offset, int *diskid,
 			  unsigned long long *disk_offset);
+static int max_mask_cpu(void);
 static int cpu_online_mask_init(void);
 static int per_cpu_init(void);
 static int get_data_from_elf_note_desc(const char *note_buf, uint32_t n_descsz,
@@ -750,15 +751,13 @@ sadump_initialize_bitmap_memory(void)
 {
 	struct sadump_header *sh = si->sh_memory;
 	struct dump_bitmap *bmp;
-	unsigned long dumpable_bitmap_offset, dumpable_bitmap_len;
+	unsigned long dumpable_bitmap_offset;
 	unsigned long long section, max_section, pfn;
 	unsigned long long *block_table;
 
 	dumpable_bitmap_offset =
 		si->sub_hdr_offset +
 		sh->block_size * (sh->sub_hdr_size + sh->bitmap_blocks);
-
-	dumpable_bitmap_len = sh->block_size * sh->dumpable_bitmap_blocks;
 
 	bmp = malloc(sizeof(struct dump_bitmap));
 	if (bmp == NULL) {
@@ -796,6 +795,12 @@ sadump_initialize_bitmap_memory(void)
 	si->block_table = block_table;
 
 	return TRUE;
+}
+
+static int
+max_mask_cpu(void)
+{
+	return BITPERBYTE * si->cpumask_size;
 }
 
 static int
@@ -942,11 +947,10 @@ failed:
 #endif /* __x86_64__ */
 
 int
-readpmem_sadump(unsigned long long paddr, void *bufptr, size_t size)
+readpage_sadump(unsigned long long paddr, void *bufptr)
 {
 	unsigned long long pfn, block, whole_offset, perdisk_offset;
 	ulong page_offset;
-	char buf[info->page_size];
 	int fd_memory;
 
 	if (si->kdump_backed_up &&
@@ -958,12 +962,12 @@ readpmem_sadump(unsigned long long paddr, void *bufptr, size_t size)
 	page_offset = paddr % info->page_size;
 
 	if (pfn >= si->sh_memory->max_mapnr)
-		goto error;
+		return FALSE;
 
 	if (!is_dumpable(info->bitmap_memory, pfn)) {
 		ERRMSG("pfn(%llx) is excluded from %s.\n", pfn,
 		       info->name_memory);
-		goto error;
+		return FALSE;
 	}
 
 	block = pfn_to_block(pfn);
@@ -973,7 +977,7 @@ readpmem_sadump(unsigned long long paddr, void *bufptr, size_t size)
 		int diskid;
 
 		if (!lookup_diskset(whole_offset, &diskid, &perdisk_offset))
-			goto error;
+			return FALSE;
 
 		fd_memory = si->diskset_info[diskid].fd_memory;
 		perdisk_offset += si->diskset_info[diskid].data_offset;
@@ -985,19 +989,12 @@ readpmem_sadump(unsigned long long paddr, void *bufptr, size_t size)
 	}
 
 	if (lseek(fd_memory, perdisk_offset, SEEK_SET) < 0)
-		goto error;
+		return FALSE;
 
-	if (read(fd_memory, buf, sizeof(buf)) != sizeof(buf))
-		goto error;
+	if (read(fd_memory, bufptr, info->page_size) != info->page_size)
+		return FALSE;
 
-	memcpy(bufptr, buf + page_offset, size);
-
-	return size;
-
-error:
-	DEBUG_MSG("type_addr: %d, addr:%llx, size:%zd\n", PADDR, paddr, size);
-
-	return FALSE;
+	return TRUE;
 }
 
 int
@@ -1289,6 +1286,9 @@ is_online_cpu(int cpu)
 {
 	unsigned long mask;
 
+	if (cpu < 0 || cpu >= max_mask_cpu())
+		return FALSE;
+
 	mask = ULONG(si->cpu_online_mask_buf +
 		     (cpu / BITPERWORD) * sizeof(unsigned long));
 
@@ -1300,7 +1300,7 @@ legacy_per_cpu_ptr(unsigned long ptr, int cpu)
 {
 	unsigned long addr;
 
-	if (cpu < 0 || cpu >= get_nr_cpus())
+	if (!is_online_cpu(cpu))
 		return 0UL;
 
 	if (!readmem(VADDR, ~ptr + cpu*sizeof(unsigned long), &addr,
@@ -1313,7 +1313,7 @@ legacy_per_cpu_ptr(unsigned long ptr, int cpu)
 static unsigned long
 per_cpu_ptr(unsigned long ptr, int cpu)
 {
-	if (cpu < 0 || cpu >= get_nr_cpus())
+	if (!is_online_cpu(cpu))
 		return 0UL;
 
 	if (si->__per_cpu_offset[cpu] == si->__per_cpu_load)
@@ -1329,7 +1329,7 @@ get_prstatus_from_crash_notes(int cpu, char *prstatus_buf)
 	char note_buf[KEXEC_NOTE_BYTES], zero_buf[KEXEC_NOTE_BYTES];
 	char *prstatus_ptr;
 
-	if (cpu < 0 || get_nr_cpus() <= cpu)
+	if (!is_online_cpu(cpu))
 		return FALSE;
 
 	if (SYMBOL(crash_notes) == NOT_FOUND_SYMBOL)

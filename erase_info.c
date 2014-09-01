@@ -21,8 +21,24 @@
 #include "dwarf_info.h"
 #include "erase_info.h"
 
+#include <dlfcn.h>
+
 struct erase_info	*erase_info = NULL;
 unsigned long		num_erase_info = 1; /* Node 0 is unused. */
+
+struct call_back eppic_cb = {
+	&get_domain,
+	&readmem,
+	&get_die_attr_type,
+	&get_die_name,
+	&get_die_offset,
+	&get_die_length,
+	&get_die_member,
+	&get_die_nfields,
+	&get_symbol_addr,
+	&update_filter_info_raw
+};
+
 
 /*
  * flags for config_entry.flag
@@ -65,6 +81,8 @@ struct filter_info {
 	/* direct access to update erase information node */
 	int			erase_info_idx;	/* 0= invalid index */
 	int			size_idx;
+
+	int			erase_ch;
 
 	struct filter_info      *next;
 	unsigned short          nullify;
@@ -1574,10 +1592,39 @@ update_filter_info(struct config_entry *filter_symbol,
 	fl_info->paddr   = vaddr_to_paddr(sym_addr);
 	fl_info->size    = size;
 	fl_info->nullify = filter_symbol->nullify;
+	fl_info->erase_ch = 'X';
 
 	if (insert_filter_info(fl_info)) {
 		fl_info->erase_info_idx = add_erase_info_node(filter_symbol);
 		fl_info->size_idx = get_size_index(fl_info->erase_info_idx);
+	}
+	return TRUE;
+}
+
+int
+update_filter_info_raw(unsigned long long sym_addr, int ch, int len)
+{
+	struct filter_info *fl_info;
+
+	fl_info = calloc(1, sizeof(struct filter_info));
+	if (fl_info == NULL) {
+		ERRMSG("Can't allocate filter info\n");
+		return FALSE;
+	}
+
+	fl_info->vaddr   = sym_addr;
+	fl_info->paddr   = vaddr_to_paddr(sym_addr);
+	fl_info->size    = len;
+	fl_info->nullify = 0;
+	fl_info->erase_ch = ch;
+
+	if (insert_filter_info(fl_info)) {
+		/* TODO
+		 * Add support to update erase information to the
+		 * resulting dump file
+		 */
+		fl_info->erase_info_idx = 0;
+		fl_info->size_idx = 0;
 	}
 	return TRUE;
 }
@@ -1811,6 +1858,59 @@ process_config_file(const char *name_config)
 	return TRUE;
 }
 
+
+/* Process the eppic macro using eppic library */
+static int
+process_eppic_file(char *name_config)
+{
+	void *handle;
+	void (*eppic_load)(char *), (*eppic_unload)(char *);
+	int (*eppic_init)();
+
+	/*
+	 * Dynamically load the eppic_makedumpfile.so library.
+	 */
+	handle = dlopen("eppic_makedumpfile.so", RTLD_LAZY);
+	if (!handle) {
+		ERRMSG("dlopen failed: %s\n", dlerror());
+		return FALSE;
+	}
+
+	/* TODO
+	 * Support specifying eppic macros in makedumpfile.conf file
+	 */
+
+	eppic_init = dlsym(handle, "eppic_init");
+	if (!eppic_init) {
+		ERRMSG("Could not find eppic_init function\n");
+		return FALSE;
+	}
+
+	eppic_load = dlsym(handle, "eppic_load");
+	if (!eppic_load) {
+		ERRMSG("Could not find eppic_load function\n");
+		return FALSE;
+	}
+
+	eppic_unload = dlsym(handle, "eppic_unload");
+	if (!eppic_unload)
+		ERRMSG("Could not find eppic_unload function\n");
+
+	if (eppic_init(&eppic_cb)) {
+		ERRMSG("Init failed \n");
+		return FALSE;
+	}
+
+	/* Load/compile, execute and unload the eppic macro */
+	eppic_load(name_config);
+	eppic_unload(name_config);
+
+	if (dlclose(handle))
+		ERRMSG("dlclose failed: %s\n", dlerror());
+
+	return TRUE;
+}
+
 static void
 split_filter_info(struct filter_info *prev, unsigned long long next_paddr,
 						size_t size)
@@ -1904,7 +2004,7 @@ extract_filter_info(unsigned long long start_paddr,
 int
 gather_filter_info(void)
 {
-	int ret;
+	int ret = TRUE;
 
 	/*
 	 * Before processing filter config file, load the symbol data of
@@ -1915,7 +2015,17 @@ gather_filter_info(void)
 	if (!load_module_symbols())
 		return FALSE;
 
-	ret = process_config_file(info->name_filterconfig);
+	/*
+	 * XXX: We support specifying both makedumpfile.conf and
+	 * eppic macro at the same time. Whether to retain or discard the
+	 * functionality provided by makedumpfile.conf is open for
+	 * discussion
+	 */
+	if (info->name_filterconfig)
+		ret = process_config_file(info->name_filterconfig);
+
+	if (info->name_eppic_config)
+		ret &= process_eppic_file(info->name_eppic_config);
 
 	/*
 	 * Remove modules symbol information, we dont need now.
@@ -1968,7 +2078,7 @@ filter_data_buffer(unsigned char *buf, unsigned long long paddr,
 		if (fl_info.nullify)
 			memset(buf_ptr, 0, fl_info.size);
 		else
-			memset(buf_ptr, 'X', fl_info.size);
+			memset(buf_ptr, fl_info.erase_ch, fl_info.size);
 	}
 }
 
