@@ -31,6 +31,12 @@
 #include <libelf.h>
 #include <byteswap.h>
 #include <getopt.h>
+#ifdef USELZO
+#include <lzo/lzo1x.h>
+#endif
+#ifdef USESNAPPY
+#include <snappy-c.h>
+#endif
 #include "common.h"
 #include "dwarf_info.h"
 #include "diskdump_mod.h"
@@ -65,14 +71,44 @@ int get_mem_type(void);
  * The following values are for linux-2.6.25 or former.
  */
 #define PG_lru_ORIGINAL	 	(5)
+#define PG_slab_ORIGINAL	(7)
 #define PG_private_ORIGINAL	(11)	/* Has something at ->private */
 #define PG_swapcache_ORIGINAL	(15)	/* Swap page: swp_entry_t in private */
+
+#define PAGE_BUDDY_MAPCOUNT_VALUE_v2_6_38	(-2)
+#define PAGE_BUDDY_MAPCOUNT_VALUE_v2_6_39_to_latest_version	(-128)
+
+#define PAGE_FLAGS_SIZE_v2_6_27_to_latest_version	(4)
 
 #define PAGE_MAPPING_ANON	(1)
 
 #define LSEEKED_BITMAP	(1)
 #define LSEEKED_PDESC	(2)
 #define LSEEKED_PDATA	(3)
+
+/*
+ * Xen page flags
+ */
+#define BITS_PER_LONG (BITPERBYTE * sizeof(long))
+#define PG_shift(idx)	(BITS_PER_LONG - (idx))
+#define PG_mask(x, idx)	(x ## UL << PG_shift(idx))
+ /* Cleared when the owning guest 'frees' this page. */
+#define PGC_allocated       PG_mask(1, 1)
+ /* Page is Xen heap? */
+#define PGC_xen_heap        PG_mask(1, 2)
+ /* Page is broken? */
+#define PGC_broken          PG_mask(1, 7)
+ /* Mutually-exclusive page states: { inuse, offlining, offlined, free }. */
+#define PGC_state           PG_mask(3, 9)
+#define PGC_state_inuse     PG_mask(0, 9)
+#define PGC_state_offlining PG_mask(1, 9)
+#define PGC_state_offlined  PG_mask(2, 9)
+#define PGC_state_free      PG_mask(3, 9)
+#define page_state_is(ci, st) (((ci)&PGC_state) == PGC_state_##st)
+
+ /* Count of references to this frame. */
+#define PGC_count_width   PG_shift(9)
+#define PGC_count_mask    ((1UL<<PGC_count_width)-1)
 
 /*
  * Memory flags
@@ -104,6 +140,8 @@ test_bit(int nr, unsigned long addr)
 #define isLRU(flags)		test_bit(NUMBER(PG_lru), flags)
 #define isPrivate(flags)	test_bit(NUMBER(PG_private), flags)
 #define isSwapCache(flags)	test_bit(NUMBER(PG_swapcache), flags)
+#define isHWPOISON(flags)	(test_bit(NUMBER(PG_hwpoison), flags) \
+				&& (NUMBER(PG_hwpoison) != NOT_FOUND_NUMBER))
 
 static inline int
 isAnon(unsigned long mapping)
@@ -113,9 +151,8 @@ isAnon(unsigned long mapping)
 
 #define PAGESIZE()		(info->page_size)
 #define PAGESHIFT()		(info->page_shift)
-#define PAGEOFFSET(X)		(((unsigned long)(X)) & (PAGESIZE() - 1))
-#define PAGEBASE(X)		(((unsigned long)(X)) & ~(PAGESIZE() - 1))
-#define _2MB_PAGE_MASK		(~((2*1048576)-1))
+#define PAGEOFFSET(X)		(((unsigned long long)(X)) & (PAGESIZE() - 1))
+#define PAGEBASE(X)		(((unsigned long long)(X)) & ~(PAGESIZE() - 1))
 
 /*
  * for SPARSEMEM
@@ -169,6 +206,7 @@ isAnon(unsigned long mapping)
 #define FILENAME_BITMAP		"kdump_bitmapXXXXXX"
 #define FILENAME_STDOUT		"STDOUT"
 
+
 /*
  * Minimam vmcore has 2 ProgramHeaderTables(PT_NOTE and PT_LOAD).
  */
@@ -178,12 +216,16 @@ isAnon(unsigned long mapping)
 	sizeof(Elf64_Ehdr)+sizeof(Elf64_Phdr)+sizeof(Elf64_Phdr)
 #define MIN_ELF_HEADER_SIZE \
 	MAX(MIN_ELF32_HEADER_SIZE, MIN_ELF64_HEADER_SIZE)
-#define STRNEQ(A, B)	(A && B && \
+static inline int string_exists(char *s) { return (s ? TRUE : FALSE); }
+#define STRNEQ(A, B)(string_exists((char *)(A)) &&	\
+		     string_exists((char *)(B)) &&	\
 	(strncmp((char *)(A), (char *)(B), strlen((char *)(B))) == 0))
 
 #define USHORT(ADDR)	*((unsigned short *)(ADDR))
 #define UINT(ADDR)	*((unsigned int *)(ADDR))
 #define ULONG(ADDR)	*((unsigned long *)(ADDR))
+#define ULONGLONG(ADDR)	*((unsigned long long *)(ADDR))
+
 
 /*
  * for symbol
@@ -222,23 +264,26 @@ do { \
 #define ARRAY_LENGTH(X)		(array_table.X)
 #define SIZE_INIT(X, Y) \
 do { \
-	if ((SIZE(X) = get_structure_size(Y, 0)) == FAILED_DWARFINFO) \
+	if ((SIZE(X) = get_structure_size(Y, DWARF_INFO_GET_STRUCT_SIZE))	\
+		== FAILED_DWARFINFO) \
 		return FALSE; \
 } while (0)
 #define TYPEDEF_SIZE_INIT(X, Y) \
 do { \
-	if ((SIZE(X) = get_structure_size(Y, 1)) == FAILED_DWARFINFO) \
+	if ((SIZE(X) = get_structure_size(Y, DWARF_INFO_GET_TYPEDEF_SIZE)) \
+		== FAILED_DWARFINFO) \
 		return FALSE; \
+} while (0)
+#define ENUM_TYPE_SIZE_INIT(X, Y) \
+do { \
+	if ((SIZE(X) = get_structure_size(Y,	\
+		DWARF_INFO_GET_ENUMERATION_TYPE_SIZE))	\
+			== FAILED_DWARFINFO)				\
+	return FALSE; \
 } while (0)
 #define OFFSET_INIT(X, Y, Z) \
 do { \
 	if ((OFFSET(X) = get_member_offset(Y, Z, DWARF_INFO_GET_MEMBER_OFFSET)) \
-	     == FAILED_DWARFINFO) \
-		return FALSE; \
-} while (0)
-#define OFFSET_IN_UNION_INIT(X, Y, Z) \
-do { \
-	if ((OFFSET(X) = get_member_offset(Y, Z, DWARF_INFO_GET_MEMBER_OFFSET_IN_UNION)) \
 	     == FAILED_DWARFINFO) \
 		return FALSE; \
 } while (0)
@@ -380,7 +425,7 @@ do { \
 #define KVER_MIN_SHIFT 16
 #define KERNEL_VERSION(x,y,z) (((x) << KVER_MAJ_SHIFT) | ((y) << KVER_MIN_SHIFT) | (z))
 #define OLDEST_VERSION		KERNEL_VERSION(2, 6, 15)/* linux-2.6.15 */
-#define LATEST_VERSION		KERNEL_VERSION(3, 2, 0)/* linux-3.2.0 */
+#define LATEST_VERSION		KERNEL_VERSION(3, 6, 7)/* linux-3.6.7 */
 
 /*
  * vmcoreinfo in /proc/vmcore
@@ -412,8 +457,6 @@ do { \
 #define TIMEOUT_STDIN	(600)
 #define SIZE_BUF_STDIN	(4096)
 #define STRLEN_OSRELEASE (65)	/* same length as diskdump.h */
-
-#define SIZE_XEN_CRASH_INFO_V2	(sizeof(unsigned long) * 10)
 
 /*
  * The value of dependence on machine
@@ -468,7 +511,10 @@ do { \
 #define _PAGE_PRESENT		(0x001)
 #define _PAGE_PSE		(0x080)
 
-#define ENTRY_MASK		(~0x8000000000000fffULL)
+/* Physical addresses are up to 52 bits (AMD64).
+ * Mask off bits 52-62 (reserved) and bit 63 (NX).
+ */
+#define ENTRY_MASK		(~0xfff0000000000fffULL)
 
 #endif /* x86 */
 
@@ -501,8 +547,12 @@ do { \
 #define PML4_SHIFT		(39)
 #define PTRS_PER_PML4		(512)
 #define PGDIR_SHIFT		(30)
+#define PGDIR_SIZE		(1UL << PGDIR_SHIFT)
+#define PGDIR_MASK		(~(PGDIR_SIZE - 1))
 #define PTRS_PER_PGD		(512)
 #define PMD_SHIFT		(21)
+#define PMD_SIZE		(1UL << PMD_SHIFT)
+#define PMD_MASK		(~(PMD_SIZE - 1))
 #define PTRS_PER_PMD		(512)
 #define PTRS_PER_PTE		(512)
 #define PTE_SHIFT		(12)
@@ -513,11 +563,7 @@ do { \
 #define pte_index(address)  (((address) >> PTE_SHIFT) & (PTRS_PER_PTE - 1))
 
 #define _PAGE_PRESENT		(0x001)
-#define _PAGE_PSE		(0x080)    /* 2MB page */
-
-#define __PHYSICAL_MASK_SHIFT	(40)
-#define __PHYSICAL_MASK		((1UL << __PHYSICAL_MASK_SHIFT) - 1)
-#define PHYSICAL_PAGE_MASK	(~(PAGESIZE()-1) & (__PHYSICAL_MASK << PAGESHIFT()))
+#define _PAGE_PSE		(0x080)    /* 2MB or 1GB page */
 
 #endif /* x86_64 */
 
@@ -527,7 +573,8 @@ do { \
 #define VMALLOCBASE     	(0xD000000000000000)
 #define KVBASE			(SYMBOL(_stext))
 #define _SECTION_SIZE_BITS	(24)
-#define _MAX_PHYSMEM_BITS	(44)
+#define _MAX_PHYSMEM_BITS_ORIG  (44)
+#define _MAX_PHYSMEM_BITS_3_7   (46)
 #endif
 
 #ifdef __powerpc32__
@@ -561,6 +608,7 @@ do { \
 #define _REGION_ENTRY_TYPE_MASK	0x0c	/* region table type mask */
 #define _REGION_ENTRY_INVALID	0x20	/* invalid region table entry */
 #define _REGION_ENTRY_LENGTH	0x03	/* region table length */
+#define _REGION_ENTRY_LARGE	0x400
 #define _REGION_OFFSET_MASK	0x7ffUL	/* region/segment table offset mask */
 
 #define RSG_TABLE_LEVEL(x)	(((x) & _REGION_ENTRY_TYPE_MASK) >> 2)
@@ -573,7 +621,6 @@ do { \
 #define _SEGMENT_INDEX_SHIFT	20
 
 /* Hardware bits in the page table entry */
-#define _PAGE_CO		0x100	/* HW Change-bit override */
 #define _PAGE_ZERO		0x800	/* Bit pos 52 must conatin zero */
 #define _PAGE_INVALID		0x400	/* HW invalid bit */
 #define _PAGE_INDEX_SHIFT	12
@@ -716,6 +763,43 @@ unsigned long long vaddr_to_paddr_ia64(unsigned long vaddr);
 #define pfn_to_paddr(X) \
 	(((unsigned long long)(X) + ARCH_PFN_OFFSET) << PAGESHIFT())
 
+/* Format of Xen crash info ELF note */
+typedef struct {
+	unsigned long xen_major_version;
+	unsigned long xen_minor_version;
+	unsigned long xen_extra_version;
+	unsigned long xen_changeset;
+	unsigned long xen_compiler;
+	unsigned long xen_compile_date;
+	unsigned long xen_compile_time;
+	unsigned long tainted;
+} xen_crash_info_com_t;
+
+typedef struct {
+	xen_crash_info_com_t com;
+#if defined(__x86__) || defined(__x86_64__)
+	/* added by changeset 2b43fb3afb3e: */
+	unsigned long dom0_pfn_to_mfn_frame_list_list;
+#endif
+#if defined(__ia64__)
+	/* added by changeset d7c3b12014b3: */
+	unsigned long dom0_mm_pgd_mfn;
+#endif
+} xen_crash_info_t;
+
+/* changeset 439a3e9459f2 added xen_phys_start
+ * to the middle of the struct... */
+typedef struct {
+	xen_crash_info_com_t com;
+#if defined(__x86__) || defined(__x86_64__)
+	unsigned long xen_phys_start;
+	unsigned long dom0_pfn_to_mfn_frame_list_list;
+#endif
+#if defined(__ia64__)
+	unsigned long dom0_mm_pgd_mfn;
+#endif
+} xen_crash_info_v2_t;
+
 struct mem_map_data {
 	unsigned long long	pfn_start;
 	unsigned long long	pfn_end;
@@ -738,6 +822,8 @@ struct cache_data {
 	size_t	cache_size;
 	off_t	offset;
 };
+typedef unsigned long int ulong;
+typedef unsigned long long int ulonglong;
 
 /*
  * makedumpfile header
@@ -787,6 +873,7 @@ struct DumpInfo {
 	int		num_dump_level;      /* number of dump level */
 	int		array_dump_level[NUM_ARRAY_DUMP_LEVEL];
 	int		flag_compress;       /* flag of compression */
+	int		flag_lzo_support;    /* flag of LZO compression support */
 	int		flag_elf_dumpfile;   /* flag of creating ELF dumpfile */
 	int		flag_generate_vmcoreinfo;/* flag of generating vmcoreinfo file */
 	int		flag_read_vmcoreinfo;    /* flag of reading vmcoreinfo file */
@@ -797,6 +884,7 @@ struct DumpInfo {
 	int		flag_rearrange;      /* flag of creating dumpfile from
 						flattened format */
 	int		flag_split;	     /* splitting vmcore */
+  	int		flag_cyclic;	     /* cyclic processing to keep memory consumption */
 	int		flag_reassemble;     /* reassemble multiple dumpfiles into one */
 	int		flag_refiltering;    /* refilter from kdump-compressed file */
 	int		flag_force;	     /* overwrite existing stuff */
@@ -824,6 +912,12 @@ struct DumpInfo {
 	 */
 	char		*name_filterconfig;
 	FILE		*file_filterconfig;
+
+	/*
+	 * Filter config file containing eppic language filtering rules
+	 * to filter out kernel data from vmcore
+	 */
+	char		*name_eppic_config;
 
 	/*
 	 * diskdimp info:
@@ -898,6 +992,16 @@ struct DumpInfo {
 	/*
 	 * for Xen extraction
 	 */
+	union {				/* Both versions of Xen crash info: */
+		xen_crash_info_com_t *com;   /* common fields */
+		xen_crash_info_t *v1;	     /* without xen_phys_start */
+		xen_crash_info_v2_t *v2;     /* changeset 439a3e9459f2 */
+	} xen_crash_info;
+	int xen_crash_info_v;		/* Xen crash info version:
+					 *   0 .. xen_crash_info_com_t
+					 *   1 .. xen_crash_info_t
+					 *   2 .. xen_crash_info_v2_t */
+
 	unsigned long long	dom0_mapnr;  /* The number of page in domain-0.
 					      * Different from max_mapnr.
 					      * max_mapnr is the number of page
@@ -913,6 +1017,10 @@ struct DumpInfo {
 	unsigned long *p2m_mfn_frame_list;
 	int	num_domain;
 	struct domain_list *domain_list;
+#if defined(__x86_64__)
+	unsigned long xen_virt_start;
+	unsigned long directmap_virt_end;
+#endif
 
 	/*
 	 * for splitting
@@ -921,10 +1029,26 @@ struct DumpInfo {
 	unsigned long long split_end_pfn;  
 
 	/*
+	 * for cyclic processing
+	 */
+	char               *partial_bitmap1;
+	char               *partial_bitmap2;
+	unsigned long long cyclic_start_pfn;
+	unsigned long long cyclic_end_pfn;  
+	unsigned long long num_dumpable;
+	unsigned long      bufsize_cyclic;
+	unsigned long      pfn_cyclic;
+
+	/*
 	 * sadump info:
 	 */
 	int flag_sadump_diskset;
 	enum sadump_format_type flag_sadump;         /* sadump format type */
+	/*
+	 * for filtering free pages managed by buddy system:
+	 */
+	int (*page_is_buddy)(unsigned long flags, unsigned int _mapcount,
+			     unsigned long private, unsigned int _count);
 };
 extern struct DumpInfo		*info;
 
@@ -981,6 +1105,8 @@ struct symbol_table {
 	unsigned long long	log_buf;
 	unsigned long long	log_buf_len;
 	unsigned long long	log_end;
+	unsigned long long	log_first_idx;
+	unsigned long long	log_next_idx;
 	unsigned long long	max_pfn;
 	unsigned long long	node_remap_start_vaddr;
 	unsigned long long	node_remap_end_vaddr;
@@ -1060,6 +1186,9 @@ struct size_table {
 	long	cpumask_t;
 	long	kexec_segment;
 	long	elf64_hdr;
+	long	log;
+
+	long	pageflags;
 };
 
 struct offset_table {
@@ -1068,6 +1197,8 @@ struct offset_table {
 		long	_count;
 		long	mapping;
 		long	lru;
+		long	_mapcount;
+		long	private;
 	} page;
 	struct mem_section {
 		long	section_mem_map;
@@ -1189,6 +1320,13 @@ struct offset_table {
 		long	p_paddr;
 		long	p_memsz;
 	} elf64_phdr;
+
+	struct log_s {
+		long ts_nsec;
+		long len;
+		long text_len;
+	} log;
+
 };
 
 /*
@@ -1229,6 +1367,11 @@ struct number_table {
 	long	PG_lru;
 	long	PG_private;
 	long	PG_swapcache;
+	long	PG_buddy;
+	long	PG_slab;
+	long    PG_hwpoison;
+
+	long	PAGE_BUDDY_MAPCOUNT_VALUE;
 };
 
 struct srcfile_table {
@@ -1272,6 +1415,7 @@ struct domain_list {
 
 #ifdef __arm__
 #define kvtop_xen(X)	FALSE
+#define get_xen_basic_info_arch(X) FALSE
 #define get_xen_info_arch(X) FALSE
 #endif	/* arm */
 
@@ -1281,6 +1425,7 @@ struct domain_list {
 #define HYPERVISOR_VIRT_END		(0xFFFFFFFFUL)
 #define DIRECTMAP_VIRT_START		(0xFF000000UL)
 #define DIRECTMAP_VIRT_END		(0xFFC00000UL)
+#define FRAMETABLE_VIRT_START		(0xF6800000UL)
 
 #define is_xen_vaddr(x) \
 	((x) >= HYPERVISOR_VIRT_START_PAE && (x) < HYPERVISOR_VIRT_END)
@@ -1290,6 +1435,8 @@ struct domain_list {
 unsigned long long kvtop_xen_x86(unsigned long kvaddr);
 #define kvtop_xen(X)	kvtop_xen_x86(X)
 
+int get_xen_basic_info_x86(void);
+#define get_xen_basic_info_arch(X) get_xen_basic_info_x86(X)
 int get_xen_info_x86(void);
 #define get_xen_info_arch(X) get_xen_info_x86(X)
 
@@ -1297,26 +1444,37 @@ int get_xen_info_x86(void);
 
 #ifdef __x86_64__
 
-#define ENTRY_MASK		(~0x8000000000000fffULL)
+/* The architectural limit for physical addresses is 52 bits.
+ * Mask off bits 52-62 (available for OS use) and bit 63 (NX).
+ */
+#define ENTRY_MASK		(~0xfff0000000000fffULL)
 #define MAX_X86_64_FRAMES	(info->page_size / sizeof(unsigned long))
 
 #define PAGE_OFFSET_XEN_DOM0  (0xffff880000000000) /* different from linux */
 #define HYPERVISOR_VIRT_START (0xffff800000000000)
 #define HYPERVISOR_VIRT_END   (0xffff880000000000)
 #define DIRECTMAP_VIRT_START  (0xffff830000000000)
-#define DIRECTMAP_VIRT_END    (0xffff840000000000)
-#define XEN_VIRT_START        (0xffff828c80000000)
+#define DIRECTMAP_VIRT_END_V3 (0xffff840000000000)
+#define DIRECTMAP_VIRT_END_V4 (0xffff880000000000)
+#define DIRECTMAP_VIRT_END    (info->directmap_virt_end)
+#define XEN_VIRT_START_V3     (0xffff828c80000000)
+#define XEN_VIRT_START_V4     (0xffff82c480000000)
+#define XEN_VIRT_START        (info->xen_virt_start)
+#define XEN_VIRT_END          (XEN_VIRT_START + (1UL << 30))
+#define FRAMETABLE_VIRT_START 0xffff82f600000000
 
 #define is_xen_vaddr(x) \
 	((x) >= HYPERVISOR_VIRT_START && (x) < HYPERVISOR_VIRT_END)
 #define is_direct(x) \
 	((x) >= DIRECTMAP_VIRT_START && (x) < DIRECTMAP_VIRT_END)
 #define is_xen_text(x) \
-	((x) >= XEN_VIRT_START && (x) < DIRECTMAP_VIRT_START)
+	((x) >= XEN_VIRT_START && (x) < XEN_VIRT_END)
 
 unsigned long long kvtop_xen_x86_64(unsigned long kvaddr);
 #define kvtop_xen(X)	kvtop_xen_x86_64(X)
 
+int get_xen_basic_info_x86_64(void);
+#define get_xen_basic_info_arch(X) get_xen_basic_info_x86_64(X)
 int get_xen_info_x86_64(void);
 #define get_xen_info_arch(X) get_xen_info_x86_64(X)
 
@@ -1352,6 +1510,8 @@ int get_xen_info_x86_64(void);
 unsigned long long kvtop_xen_ia64(unsigned long kvaddr);
 #define kvtop_xen(X)	kvtop_xen_ia64(X)
 
+int get_xen_basic_info_ia64(void);
+#define get_xen_basic_info_arch(X) get_xen_basic_info_ia64(X)
 int get_xen_info_ia64(void);
 #define get_xen_info_arch(X) get_xen_info_ia64(X)
 
@@ -1359,11 +1519,13 @@ int get_xen_info_ia64(void);
 
 #if defined(__powerpc64__) || defined(__powerpc32__) /* powerpcXX */
 #define kvtop_xen(X)	FALSE
+#define get_xen_basic_info_arch(X) FALSE
 #define get_xen_info_arch(X) FALSE
 #endif	/* powerpcXX */
 
 #ifdef __s390x__ /* s390x */
 #define kvtop_xen(X)	FALSE
+#define get_xen_basic_info_arch(X) FALSE
 #define get_xen_info_arch(X) FALSE
 #endif	/* s390x */
 
@@ -1387,6 +1549,24 @@ is_dumpable(struct dump_bitmap *bitmap, unsigned long long pfn)
 			bitmap->no_block = pfn/PFN_BUFBITMAP;
 	}
 	return is_on(bitmap->buf, pfn%PFN_BUFBITMAP);
+}
+
+static inline int
+is_dumpable_cyclic(char *bitmap, unsigned long long pfn)
+{
+	if (pfn < info->cyclic_start_pfn || info->cyclic_end_pfn <= pfn)
+		return FALSE;
+	else
+		return is_on(bitmap, pfn - info->cyclic_start_pfn);
+}
+
+static inline int
+is_cyclic_region(unsigned long long pfn)
+{
+	if (pfn < info->cyclic_start_pfn || info->cyclic_end_pfn <= pfn)
+		return FALSE;
+	else
+		return TRUE;
 }
 
 static inline int
@@ -1473,5 +1653,14 @@ struct elf_prstatus {
 };
 
 #endif
+
+/*
+ * Function Prototype.
+ */
+unsigned long long get_num_dumpable_cyclic(void);
+int get_loads_dumpfile_cyclic(void);
+int initial_xen(void);
+unsigned long long get_free_memory_size(void);
+int calculate_cyclic_buffer_size(void);
 
 #endif /* MAKEDUMPFILE_H */

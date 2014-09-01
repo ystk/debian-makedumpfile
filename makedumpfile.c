@@ -19,7 +19,9 @@
 #include "elf_info.h"
 #include "erase_info.h"
 #include "sadump_info.h"
+#include "cache.h"
 #include <stddef.h>
+#include <ctype.h>
 #include <sys/time.h>
 
 struct symbol_table	symbol_table;
@@ -43,6 +45,9 @@ unsigned long long pfn_cache;
 unsigned long long pfn_cache_private;
 unsigned long long pfn_user;
 unsigned long long pfn_free;
+unsigned long long pfn_hwpoison;
+
+unsigned long long num_dumped;
 
 int retcd = FAILED;	/* return code */
 
@@ -54,6 +59,9 @@ do { \
 	for (i = 0; i < num_member; i++, ptr_long_table++) \
 		*ptr_long_table = value; \
 } while (0)
+
+static void check_cyclic_buffer_overrun(void);
+static void setup_page_is_buddy(void);
 
 void
 initialize_tables(void)
@@ -143,13 +151,15 @@ get_dom0_mapnr()
 {
 	unsigned long max_pfn;
 
-	if (SYMBOL(max_pfn) == NOT_FOUND_SYMBOL)
-		return FALSE;
+	if (SYMBOL(max_pfn) != NOT_FOUND_SYMBOL) {
+		if (!readmem(VADDR, SYMBOL(max_pfn), &max_pfn, sizeof max_pfn)) {
+			ERRMSG("Can't read domain-0 max_pfn.\n");
+			return FALSE;
+		}
 
-	if (!readmem(VADDR, SYMBOL(max_pfn), &max_pfn, sizeof max_pfn))
-		return FALSE;
-
-	info->dom0_mapnr = max_pfn;
+		info->dom0_mapnr = max_pfn;
+		DEBUG_MSG("domain-0 pfn : %llx\n", info->dom0_mapnr);
+	}
 
 	return TRUE;
 }
@@ -165,6 +175,7 @@ is_in_same_page(unsigned long vaddr1, unsigned long vaddr2)
 
 #define BITMAP_SECT_LEN 4096
 static inline int is_dumpable(struct dump_bitmap *, unsigned long long);
+static inline int is_dumpable_cyclic(char *bitmap, unsigned long long);
 unsigned long
 pfn_to_pos(unsigned long long pfn)
 {
@@ -220,70 +231,118 @@ read_page_desc(unsigned long long paddr, page_desc_t *pd)
 	return TRUE;
 }
 
-int
-readpmem_kdump_compressed(unsigned long long paddr, void *bufptr, size_t size)
+static int
+readpage_elf(unsigned long long paddr, void *bufptr)
+{
+	const off_t failed = (off_t)-1;
+	off_t offset = 0;
+
+	if (!(offset = paddr_to_offset(paddr))) {
+		ERRMSG("Can't convert a physical address(%llx) to offset.\n",
+		       paddr);
+		return FALSE;
+	}
+
+	if (lseek(info->fd_memory, offset, SEEK_SET) == failed) {
+		ERRMSG("Can't seek the dump memory(%s). (offset: %llx) %s\n",
+		       info->name_memory, (unsigned long long)offset, strerror(errno));
+		return FALSE;
+	}
+
+	if (read(info->fd_memory, bufptr, info->page_size) != info->page_size) {
+		ERRMSG("Can't read the dump memory(%s). %s\n",
+		       info->name_memory, strerror(errno));
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+static int
+readpage_kdump_compressed(unsigned long long paddr, void *bufptr)
 {
 	page_desc_t pd;
-	char buf[info->page_size];
-	char buf2[info->page_size];
+	char buf[info->page_size], *rdbuf;
 	int ret;
-	unsigned long retlen, page_offset;
-
-	page_offset = paddr % info->page_size;
+	unsigned long retlen;
 
 	if (!is_dumpable(info->bitmap_memory, paddr_to_pfn(paddr))) {
 		ERRMSG("pfn(%llx) is excluded from %s.\n",
 				paddr_to_pfn(paddr), info->name_memory);
-		goto error;
+		return FALSE;
 	}
 
 	if (!read_page_desc(paddr, &pd)) {
 		ERRMSG("Can't read page_desc: %llx\n", paddr);
-		goto error;
+		return FALSE;
 	}
 
 	if (lseek(info->fd_memory, pd.offset, SEEK_SET) < 0) {
 		ERRMSG("Can't seek %s. %s\n",
 				info->name_memory, strerror(errno));
-		goto error;
+		return FALSE;
 	}
 
 	/*
 	 * Read page data
 	 */
-	if (read(info->fd_memory, buf, pd.size) != pd.size) {
+	rdbuf = pd.flags & (DUMP_DH_COMPRESSED_ZLIB | DUMP_DH_COMPRESSED_LZO |
+		DUMP_DH_COMPRESSED_SNAPPY) ? buf : bufptr;
+	if (read(info->fd_memory, rdbuf, pd.size) != pd.size) {
 		ERRMSG("Can't read %s. %s\n",
 				info->name_memory, strerror(errno));
-		goto error;
+		return FALSE;
 	}
 
-	if (pd.flags & DUMP_DH_COMPRESSED) {
+	if (pd.flags & DUMP_DH_COMPRESSED_ZLIB) {
 		retlen = info->page_size;
-		ret = uncompress((unsigned char *)buf2, &retlen,
+		ret = uncompress((unsigned char *)bufptr, &retlen,
 					(unsigned char *)buf, pd.size);
 		if ((ret != Z_OK) || (retlen != info->page_size)) {
 			ERRMSG("Uncompress failed: %d\n", ret);
-			goto error;
+			return FALSE;
 		}
-		memcpy(bufptr, buf2 + page_offset, size);
-	} else
-		memcpy(bufptr, buf + page_offset, size);
+#ifdef USELZO
+	} else if (info->flag_lzo_support
+		   && (pd.flags & DUMP_DH_COMPRESSED_LZO)) {
+		retlen = info->page_size;
+		ret = lzo1x_decompress_safe((unsigned char *)buf, pd.size,
+					    (unsigned char *)bufptr, &retlen,
+					    LZO1X_MEM_DECOMPRESS);
+		if ((ret != LZO_E_OK) || (retlen != info->page_size)) {
+			ERRMSG("Uncompress failed: %d\n", ret);
+			return FALSE;
+		}
+#endif
+#ifdef USESNAPPY
+	} else if ((pd.flags & DUMP_DH_COMPRESSED_SNAPPY)) {
 
-	return size;
-error:
-	ERRMSG("type_addr: %d, addr:%llx, size:%zd\n", PADDR, paddr, size);
-	return FALSE;
+		ret = snappy_uncompressed_length(buf, pd.size, &retlen);
+		if (ret != SNAPPY_OK) {
+			ERRMSG("Uncompress failed: %d\n", ret);
+			return FALSE;
+		}
+
+		ret = snappy_uncompress(buf, pd.size, bufptr, &retlen);
+		if ((ret != SNAPPY_OK) || (retlen != info->page_size)) {
+			ERRMSG("Uncompress failed: %d\n", ret);
+			return FALSE;
+		}
+#endif
+	}
+
+	return TRUE;
 }
 
 int
 readmem(int type_addr, unsigned long long addr, void *bufptr, size_t size)
 {
 	size_t read_size, next_size;
-	off_t offset = 0;
 	unsigned long long next_addr;
 	unsigned long long paddr, maddr = NOT_PADDR;
+	unsigned long long pgaddr;
+	void *pgbuf;
 	char *next_ptr;
-	const off_t failed = (off_t)-1;
 
 	switch (type_addr) {
 	case VADDR:
@@ -343,31 +402,29 @@ readmem(int type_addr, unsigned long long addr, void *bufptr, size_t size)
 			goto error;
 	}
 
-	if (info->flag_refiltering)
-		return readpmem_kdump_compressed(paddr, bufptr, read_size);
+	pgaddr = PAGEBASE(paddr);
+	pgbuf = cache_search(pgaddr);
+	if (!pgbuf) {
+		pgbuf = cache_alloc(pgaddr);
+		if (!pgbuf)
+			goto error;
 
-	if (info->flag_sadump)
-		return readpmem_sadump(paddr, bufptr, read_size);
-
-	if (!(offset = paddr_to_offset(paddr))) {
-		ERRMSG("Can't convert a physical address(%llx) to offset.\n",
-		    paddr);
-		goto error;
+		if (info->flag_refiltering) {
+			if (!readpage_kdump_compressed(pgaddr, pgbuf))
+				goto error;
+		} else if (info->flag_sadump) {
+			if (!readpage_sadump(pgaddr, pgbuf))
+				goto error;
+		} else {
+			if (!readpage_elf(pgaddr, pgbuf))
+				goto error;
+		}
+		cache_add(pgaddr);
 	}
 
-	if (lseek(info->fd_memory, offset, SEEK_SET) == failed) {
-		ERRMSG("Can't seek the dump memory(%s). (offset: %llx) %s\n",
-		    info->name_memory, (unsigned long long)offset, strerror(errno));
-		goto error;
-	}
-
-	if (read(info->fd_memory, bufptr, read_size) != read_size) {
-		ERRMSG("Can't read the dump memory(%s). %s\n",
-		    info->name_memory, strerror(errno));
-		goto error;
-	}
-
+	memcpy(bufptr, pgbuf + PAGEOFFSET(paddr), read_size);
 	return size;
+
 error:
 	ERRMSG("type_addr: %d, addr:%llx, size:%zd\n", type_addr, addr, size);
 	return FALSE;
@@ -752,7 +809,6 @@ open_files_for_rearranging_dumpdata(void)
 /*
  * Open the following files when it creates the dump file.
  * - dump mem
- * - dump file
  * - bit map
  * if it reads the vmcoreinfo file
  *   - vmcoreinfo file
@@ -811,6 +867,8 @@ get_symbol_info(void)
 	SYMBOL_INIT(log_buf, "log_buf");
 	SYMBOL_INIT(log_buf_len, "log_buf_len");
 	SYMBOL_INIT(log_end, "log_end");
+	SYMBOL_INIT(log_first_idx, "log_first_idx");
+	SYMBOL_INIT(log_next_idx, "log_next_idx");
 	SYMBOL_INIT(max_pfn, "max_pfn");
 	SYMBOL_INIT(modules, "modules");
 	SYMBOL_INIT(high_memory, "high_memory");
@@ -861,15 +919,9 @@ get_structure_info(void)
 	SIZE_INIT(page, "page");
 	OFFSET_INIT(page.flags, "page", "flags");
 	OFFSET_INIT(page._count, "page", "_count");
-
 	OFFSET_INIT(page.mapping, "page", "mapping");
-
-	/*
-	 * On linux-2.6.16 or later, page.mapping is defined
-	 * in anonymous union.
-	 */
-	if (OFFSET(page.mapping) == NOT_FOUND_STRUCTURE)
-		OFFSET_IN_UNION_INIT(page.mapping, "page", "mapping");
+	OFFSET_INIT(page._mapcount, "page", "_mapcount");
+	OFFSET_INIT(page.private, "page", "private");
 
 	/*
 	 * Some vmlinux(s) don't have debugging information about
@@ -961,6 +1013,11 @@ get_structure_info(void)
 	ENUM_NUMBER_INIT(PG_lru, "PG_lru");
 	ENUM_NUMBER_INIT(PG_private, "PG_private");
 	ENUM_NUMBER_INIT(PG_swapcache, "PG_swapcache");
+	ENUM_NUMBER_INIT(PG_buddy, "PG_buddy");
+	ENUM_NUMBER_INIT(PG_slab, "PG_slab");
+	ENUM_NUMBER_INIT(PG_hwpoison, "PG_hwpoison");
+
+	ENUM_TYPE_SIZE_INIT(pageflags, "pageflags");
 
 	TYPEDEF_SIZE_INIT(nodemask_t, "nodemask_t");
 
@@ -1140,6 +1197,11 @@ get_structure_info(void)
 	OFFSET_INIT(elf64_phdr.p_paddr, "elf64_phdr", "p_paddr");
 	OFFSET_INIT(elf64_phdr.p_memsz, "elf64_phdr", "p_memsz");
 
+	SIZE_INIT(log, "log");
+	OFFSET_INIT(log.ts_nsec, "log", "ts_nsec");
+	OFFSET_INIT(log.len, "log", "len");
+	OFFSET_INIT(log.text_len, "log", "text_len");
+
 	return TRUE;
 }
 
@@ -1160,6 +1222,30 @@ get_value_for_old_linux(void)
 		NUMBER(PG_private) = PG_private_ORIGINAL;
 	if (NUMBER(PG_swapcache) == NOT_FOUND_NUMBER)
 		NUMBER(PG_swapcache) = PG_swapcache_ORIGINAL;
+	if (NUMBER(PG_slab) == NOT_FOUND_NUMBER)
+		NUMBER(PG_slab) = PG_slab_ORIGINAL;
+	/*
+	 * The values from here are for free page filtering based on
+	 * mem_map array. These are minimum effort to cover old
+	 * kernels.
+	 *
+	 * The logic also needs offset values for some members of page
+	 * structure. But it much depends on kernel versions. We avoid
+	 * to hard code the values.
+	 */
+	if (NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE) == NOT_FOUND_NUMBER) {
+		if (info->kernel_version == KERNEL_VERSION(2, 6, 38))
+			NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE) =
+				PAGE_BUDDY_MAPCOUNT_VALUE_v2_6_38;
+		if (info->kernel_version >= KERNEL_VERSION(2, 6, 39))
+			NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE) =
+			PAGE_BUDDY_MAPCOUNT_VALUE_v2_6_39_to_latest_version;
+	}
+	if (SIZE(pageflags) == NOT_FOUND_STRUCTURE) {
+		if (info->kernel_version >= KERNEL_VERSION(2, 6, 27))
+			SIZE(pageflags) =
+				PAGE_FLAGS_SIZE_v2_6_27_to_latest_version;
+	}
 	return TRUE;
 }
 
@@ -1294,6 +1380,8 @@ write_vmcoreinfo_data(void)
 	WRITE_SYMBOL("log_buf", log_buf);
 	WRITE_SYMBOL("log_buf_len", log_buf_len);
 	WRITE_SYMBOL("log_end", log_end);
+	WRITE_SYMBOL("log_first_idx", log_first_idx);
+	WRITE_SYMBOL("log_next_idx", log_next_idx);
 	WRITE_SYMBOL("max_pfn", max_pfn);
 	WRITE_SYMBOL("high_memory", high_memory);
 	WRITE_SYMBOL("node_remap_start_vaddr", node_remap_start_vaddr);
@@ -1311,6 +1399,8 @@ write_vmcoreinfo_data(void)
 	WRITE_STRUCTURE_SIZE("list_head", list_head);
 	WRITE_STRUCTURE_SIZE("node_memblk_s", node_memblk_s);
 	WRITE_STRUCTURE_SIZE("nodemask_t", nodemask_t);
+	WRITE_STRUCTURE_SIZE("pageflags", pageflags);
+	WRITE_STRUCTURE_SIZE("log", log);
 
 	/*
 	 * write the member offset of 1st kernel
@@ -1319,6 +1409,8 @@ write_vmcoreinfo_data(void)
 	WRITE_MEMBER_OFFSET("page._count", page._count);
 	WRITE_MEMBER_OFFSET("page.mapping", page.mapping);
 	WRITE_MEMBER_OFFSET("page.lru", page.lru);
+	WRITE_MEMBER_OFFSET("page._mapcount", page._mapcount);
+	WRITE_MEMBER_OFFSET("page.private", page.private);
 	WRITE_MEMBER_OFFSET("mem_section.section_mem_map",
 	    mem_section.section_mem_map);
 	WRITE_MEMBER_OFFSET("pglist_data.node_zones", pglist_data.node_zones);
@@ -1341,6 +1433,9 @@ write_vmcoreinfo_data(void)
 	WRITE_MEMBER_OFFSET("node_memblk_s.size", node_memblk_s.size);
 	WRITE_MEMBER_OFFSET("node_memblk_s.nid", node_memblk_s.nid);
 	WRITE_MEMBER_OFFSET("vm_struct.addr", vm_struct.addr);
+	WRITE_MEMBER_OFFSET("log.ts_nsec", log.ts_nsec);
+	WRITE_MEMBER_OFFSET("log.len", log.len);
+	WRITE_MEMBER_OFFSET("log.text_len", log.text_len);
 
 	if (SYMBOL(node_data) != NOT_FOUND_SYMBOL)
 		WRITE_ARRAY_LENGTH("node_data", node_data);
@@ -1363,6 +1458,11 @@ write_vmcoreinfo_data(void)
 	WRITE_NUMBER("PG_lru", PG_lru);
 	WRITE_NUMBER("PG_private", PG_private);
 	WRITE_NUMBER("PG_swapcache", PG_swapcache);
+	WRITE_NUMBER("PG_buddy", PG_buddy);
+	WRITE_NUMBER("PG_slab", PG_slab);
+	WRITE_NUMBER("PG_hwpoison", PG_hwpoison);
+
+	WRITE_NUMBER("PAGE_BUDDY_MAPCOUNT_VALUE", PAGE_BUDDY_MAPCOUNT_VALUE);
 
 	/*
 	 * write the source file of 1st kernel
@@ -1596,6 +1696,8 @@ read_vmcoreinfo(void)
 	READ_SYMBOL("log_buf", log_buf);
 	READ_SYMBOL("log_buf_len", log_buf_len);
 	READ_SYMBOL("log_end", log_end);
+	READ_SYMBOL("log_first_idx", log_first_idx);
+	READ_SYMBOL("log_next_idx", log_next_idx);
 	READ_SYMBOL("max_pfn", max_pfn);
 	READ_SYMBOL("high_memory", high_memory);
 	READ_SYMBOL("node_remap_start_vaddr", node_remap_start_vaddr);
@@ -1610,11 +1712,15 @@ read_vmcoreinfo(void)
 	READ_STRUCTURE_SIZE("list_head", list_head);
 	READ_STRUCTURE_SIZE("node_memblk_s", node_memblk_s);
 	READ_STRUCTURE_SIZE("nodemask_t", nodemask_t);
+	READ_STRUCTURE_SIZE("pageflags", pageflags);
+	READ_STRUCTURE_SIZE("log", log);
 
 	READ_MEMBER_OFFSET("page.flags", page.flags);
 	READ_MEMBER_OFFSET("page._count", page._count);
 	READ_MEMBER_OFFSET("page.mapping", page.mapping);
 	READ_MEMBER_OFFSET("page.lru", page.lru);
+	READ_MEMBER_OFFSET("page._mapcount", page._mapcount);
+	READ_MEMBER_OFFSET("page.private", page.private);
 	READ_MEMBER_OFFSET("mem_section.section_mem_map",
 	    mem_section.section_mem_map);
 	READ_MEMBER_OFFSET("pglist_data.node_zones", pglist_data.node_zones);
@@ -1636,6 +1742,9 @@ read_vmcoreinfo(void)
 	READ_MEMBER_OFFSET("node_memblk_s.size", node_memblk_s.size);
 	READ_MEMBER_OFFSET("node_memblk_s.nid", node_memblk_s.nid);
 	READ_MEMBER_OFFSET("vm_struct.addr", vm_struct.addr);
+	READ_MEMBER_OFFSET("log.ts_nsec", log.ts_nsec);
+	READ_MEMBER_OFFSET("log.len", log.len);
+	READ_MEMBER_OFFSET("log.text_len", log.text_len);
 
 	READ_ARRAY_LENGTH("node_data", node_data);
 	READ_ARRAY_LENGTH("pgdat_list", pgdat_list);
@@ -1651,8 +1760,13 @@ read_vmcoreinfo(void)
 	READ_NUMBER("PG_lru", PG_lru);
 	READ_NUMBER("PG_private", PG_private);
 	READ_NUMBER("PG_swapcache", PG_swapcache);
+	READ_NUMBER("PG_slab", PG_slab);
+	READ_NUMBER("PG_buddy", PG_buddy);
+	READ_NUMBER("PG_hwpoison", PG_hwpoison);
 
 	READ_SRCFILE("pud_t", pud_t);
+
+	READ_NUMBER("PAGE_BUDDY_MAPCOUNT_VALUE", PAGE_BUDDY_MAPCOUNT_VALUE);
 
 	return TRUE;
 }
@@ -2417,14 +2531,6 @@ get_mem_map(void)
 {
 	int ret;
 
-	if (is_xen_memory()) {
-		if (!get_dom0_mapnr()) {
-			ERRMSG("Can't domain-0 pfn.\n");
-			return FALSE;
-		}
-		DEBUG_MSG("domain-0 pfn : %llx\n", info->dom0_mapnr);
-	}
-
 	switch (get_mem_type()) {
 	case SPARSEMEM:
 		DEBUG_MSG("\n");
@@ -2514,12 +2620,43 @@ initial(void)
 	unsigned long size;
 	int debug_info = FALSE;
 
-	if (!is_xen_memory() && info->flag_exclude_xen_dom) {
-		MSG("'-X' option is disable,");
-		MSG("because %s is not Xen's memory core image.\n", info->name_memory);
-		MSG("Commandline parameter is invalid.\n");
-		MSG("Try `makedumpfile --help' for more information.\n");
+	if (is_xen_memory() && !initial_xen())
 		return FALSE;
+
+#ifdef USELZO
+	if (lzo_init() == LZO_E_OK)
+		info->flag_lzo_support = TRUE;
+#else
+	if (info->flag_compress == DUMP_DH_COMPRESSED_LZO) {
+		MSG("'-l' option is disabled, ");
+		MSG("because this binary doesn't support lzo compression.\n");
+		MSG("Try `make USELZO=on` when building.\n");
+	}
+#endif
+
+#ifndef USESNAPPY
+	if (info->flag_compress == DUMP_DH_COMPRESSED_SNAPPY) {
+		MSG("'-p' option is disabled, ");
+		MSG("because this binary doesn't support snappy "
+		    "compression.\n");
+		MSG("Try `make USESNAPPY=on` when building.\n");
+	}
+#endif
+
+	if (info->flag_exclude_xen_dom) {
+		if(info->flag_cyclic) {
+			info->flag_cyclic = FALSE;
+			MSG("Switched running mode from cyclic to non-cyclic,\n");
+			MSG("because the cyclic mode doesn't support Xen.\n");
+		}
+
+		if (!is_xen_memory()) {
+			MSG("'-X' option is disable,");
+			MSG("because %s is not Xen's memory core image.\n", info->name_memory);
+			MSG("Commandline parameter is invalid.\n");
+			MSG("Try `makedumpfile --help' for more information.\n");
+			return FALSE;
+		}
 	}
 
 	if (info->flag_refiltering) {
@@ -2529,6 +2666,14 @@ initial(void)
 							info->name_memory);
 			return FALSE;
 		}
+
+		if(info->flag_cyclic) {
+			info->flag_cyclic = FALSE;
+			MSG("Switched running mode from cyclic to non-cyclic,\n");
+			MSG("because the cyclic mode doesn't support refiltering\n");
+			MSG("kdump compressed format.\n");
+		}
+
 		info->phys_base = info->kh_memory->phys_base;
 		info->max_dump_level |= info->kh_memory->dump_level;
 
@@ -2541,6 +2686,12 @@ initial(void)
 			MSG("because %s is sadump %s format.\n",
 			    info->name_memory, sadump_format_type_name());
 			return FALSE;
+		}
+
+		if(info->flag_cyclic) {
+			info->flag_cyclic = FALSE;
+			MSG("Switched running mode from cyclic to non-cyclic,\n");
+			MSG("because the cyclic mode doesn't support sadump format.\n");
 		}
 
 		set_page_size(sadump_page_size());
@@ -2619,8 +2770,6 @@ initial(void)
 		debug_info = TRUE;
 	}
 
-	if (!get_value_for_old_linux())
-		return FALSE;
 out:
 	if (!info->page_size) {
 		/*
@@ -2632,6 +2781,41 @@ out:
 	}
 	if (!get_max_mapnr())
 		return FALSE;
+
+	if (info->flag_cyclic) {
+		if (info->bufsize_cyclic == 0) {
+			if (!calculate_cyclic_buffer_size())
+				return FALSE;
+		} else {
+			unsigned long long free_memory;
+
+			/*
+                        * The buffer size is specified as Kbyte with
+                        * --cyclic-buffer <size> option.
+                        */
+			info->bufsize_cyclic <<= 10;
+
+			/*
+			 * Truncate the buffer size to free memory size.
+			 */
+			free_memory = get_free_memory_size();
+			if (info->bufsize_cyclic > free_memory) {
+				MSG("Specified buffer size is larger than free memory.\n");
+				MSG("The buffer size for the cyclic mode will ");
+				MSG("be truncated to %lld byte.\n", free_memory);
+				/*
+				 * bufsize_cyclic is used to allocate 1st and 2nd bitmap, 
+				 * so it should be truncated to the half of free_memory.
+				 */
+				info->bufsize_cyclic = free_memory / 2;
+			}
+		}
+
+		info->pfn_cyclic = info->bufsize_cyclic * BITPERBYTE;
+
+		DEBUG_MSG("\n");
+		DEBUG_MSG("Buffer size for the cyclic mode: %ld\n", info->bufsize_cyclic);
+	}
 
 	if (debug_info) {
 		if (info->flag_sadump)
@@ -2677,10 +2861,22 @@ out:
 		    !sadump_generate_elf_note_from_dumpfile())
 			return FALSE;
 
+		if (info->flag_cyclic && info->dump_level & DL_EXCLUDE_FREE)
+			check_cyclic_buffer_overrun();
+
 	} else {
 		if (!get_mem_map_without_mm())
 			return FALSE;
 	}
+
+	if (is_xen_memory() && !get_dom0_mapnr())
+		return FALSE;
+
+	if (!get_value_for_old_linux())
+		return FALSE;
+
+	if (info->flag_cyclic && (info->dump_level & DL_EXCLUDE_FREE))
+		setup_page_is_buddy();
 
 	return TRUE;
 }
@@ -2692,6 +2888,12 @@ initialize_bitmap(struct dump_bitmap *bitmap)
 	bitmap->file_name = info->name_bitmap;
 	bitmap->no_block  = -1;
 	memset(bitmap->buf, 0, BUFSIZE_BITMAP);
+}
+
+void
+initialize_bitmap_cyclic(char *bitmap)
+{
+	memset(bitmap, 0, info->bufsize_cyclic);
 }
 
 void
@@ -2758,6 +2960,27 @@ set_bitmap(struct dump_bitmap *bitmap, unsigned long long pfn,
 }
 
 int
+set_bitmap_cyclic(char *bitmap, unsigned long long pfn, int val)
+{
+	int byte, bit;
+
+	if (pfn < info->cyclic_start_pfn || info->cyclic_end_pfn <= pfn)
+		return FALSE;
+
+	/*
+	 * If val is 0, clear bit on the bitmap.
+	 */
+	byte = (pfn - info->cyclic_start_pfn)>>3;
+	bit  = (pfn - info->cyclic_start_pfn) & 7;
+	if (val)
+		bitmap[byte] |= 1<<bit;
+	else
+		bitmap[byte] &= ~(1<<bit);
+
+	return TRUE;
+}
+
+int
 sync_bitmap(struct dump_bitmap *bitmap)
 {
 	off_t offset;
@@ -2799,19 +3022,31 @@ sync_2nd_bitmap(void)
 int
 set_bit_on_1st_bitmap(unsigned long long pfn)
 {
-	return set_bitmap(info->bitmap1, pfn, 1);
+	if (info->flag_cyclic) {
+		return set_bitmap_cyclic(info->partial_bitmap1, pfn, 1);
+	} else {
+		return set_bitmap(info->bitmap1, pfn, 1);
+	}
 }
 
 int
 clear_bit_on_1st_bitmap(unsigned long long pfn)
 {
-	return set_bitmap(info->bitmap1, pfn, 0);
+	if (info->flag_cyclic) {
+		return set_bitmap_cyclic(info->partial_bitmap1, pfn, 0);
+	} else {
+		return set_bitmap(info->bitmap1, pfn, 0);
+	}
 }
 
 int
 clear_bit_on_2nd_bitmap(unsigned long long pfn)
 {
-	return set_bitmap(info->bitmap2, pfn, 0);
+	if (info->flag_cyclic) {
+		return set_bitmap_cyclic(info->partial_bitmap2, pfn, 0);
+	} else {
+		return set_bitmap(info->bitmap2, pfn, 0);
+	}
 }
 
 int
@@ -2834,7 +3069,7 @@ clear_bit_on_2nd_bitmap_for_kernel(unsigned long long pfn)
 static inline int
 is_in_segs(unsigned long long paddr)
 {
-	if (info->flag_refiltering) {
+	if (info->flag_refiltering || info->flag_sadump) {
 		static struct dump_bitmap bitmap1 = {0};
 
 		if (bitmap1.fd == 0)
@@ -3200,9 +3435,9 @@ reset_bitmap_of_free_pages(unsigned long node_zones)
 				}
 				for (i = 0; i < (1<<order); i++) {
 					pfn = start_pfn + i;
-					clear_bit_on_2nd_bitmap_for_kernel(pfn);
+					if (clear_bit_on_2nd_bitmap_for_kernel(pfn))
+						found_free_pages++;
 				}
-				found_free_pages += i;
 
 				previous = curr;
 				if (!readmem(VADDR, curr+OFFSET(list_head.next),
@@ -3236,7 +3471,7 @@ reset_bitmap_of_free_pages(unsigned long node_zones)
 		ERRMSG("Can't get free_pages.\n");
 		return FALSE;
 	}
-	if (free_pages != found_free_pages) {
+	if (free_pages != found_free_pages && !info->flag_cyclic) {
 		/*
 		 * On linux-2.6.21 or later, the number of free_pages is
 		 * sometimes different from the one of the list "free_area",
@@ -3251,14 +3486,99 @@ reset_bitmap_of_free_pages(unsigned long node_zones)
 	return TRUE;
 }
 
+static int
+dump_log_entry(char *logptr, int fp)
+{
+	char *msg, *p;
+	unsigned int i, text_len;
+	unsigned long long ts_nsec;
+	char buf[BUFSIZE];
+	ulonglong nanos;
+	ulong rem;
+
+	text_len = USHORT(logptr + OFFSET(log.text_len));
+	ts_nsec = ULONGLONG(logptr + OFFSET(log.ts_nsec));
+
+	nanos = (ulonglong)ts_nsec / (ulonglong)1000000000;
+	rem = (ulonglong)ts_nsec % (ulonglong)1000000000;
+
+	msg = logptr + SIZE(log);
+
+	sprintf(buf, "[%5lld.%06ld] ", nanos, rem/1000);
+
+	for (i = 0, p = msg; i < text_len; i++, p++) {
+		if (*p == '\n')
+			sprintf(buf, "%s.", buf);
+		else if (isprint(*p) || isspace(*p))
+			sprintf(buf, "%s%c", buf, *p);
+		else
+			sprintf(buf, "%s.", buf);
+	}
+
+	sprintf(buf, "%s\n", buf);
+
+	if (write(info->fd_dumpfile, buf, strlen(buf)) < 0)
+		return FALSE;
+	else
+		return TRUE;
+}
+
+/*
+ * get log record by index; idx must point to valid message.
+ */
+static char *
+log_from_idx(unsigned int idx, char *logbuf)
+{
+	char *logptr;
+	unsigned int msglen;
+
+	logptr = logbuf + idx;
+
+	/*
+	 * A length == 0 record is the end of buffer marker.
+	 * Wrap around and return the message at the start of
+	 * the buffer.
+	 */
+
+	msglen = USHORT(logptr + OFFSET(log.len));
+	if (!msglen)
+		logptr = logbuf;
+
+	return logptr;
+}
+
+static long
+log_next(unsigned int idx, char *logbuf)
+{
+	char *logptr;
+	unsigned int msglen;
+
+	logptr = logbuf + idx;
+
+	/*
+	 * A length == 0 record is the end of buffer marker. Wrap around and
+	 * read the message at the start of the buffer as *this* one, and
+	 * return the one after that.
+	 */
+
+	msglen = USHORT(logptr + OFFSET(log.len));
+	if (!msglen) {
+		msglen = USHORT(logbuf + OFFSET(log.len));
+		return msglen;
+	}
+
+	return idx + msglen;
+}
+
 int
 dump_dmesg()
 {
 	int log_buf_len, length_log, length_oldlog, ret = FALSE;
-	unsigned long log_buf, log_end, index;
+	unsigned long index, log_buf, log_end;
+	unsigned int idx, log_first_idx, log_next_idx;
 	unsigned long log_end_2_6_24;
 	unsigned      log_end_2_6_25;
-	char *log_buffer = NULL;
+	char *log_buffer = NULL, *log_ptr = NULL;
 
 	/*
 	 * log_end has been changed to "unsigned" since linux-2.6.25.
@@ -3276,77 +3596,123 @@ dump_dmesg()
 		return FALSE;
 
 	if ((SYMBOL(log_buf) == NOT_FOUND_SYMBOL)
-	    || (SYMBOL(log_buf_len) == NOT_FOUND_SYMBOL)
-	    || (SYMBOL(log_end) == NOT_FOUND_SYMBOL)) {
+	    || (SYMBOL(log_buf_len) == NOT_FOUND_SYMBOL)) {
 		ERRMSG("Can't find some symbols for log_buf.\n");
 		return FALSE;
+	}
+	/*
+	 * kernel 3.5 variable-length record buffer structure
+	 */
+	if (SYMBOL(log_end) == NOT_FOUND_SYMBOL) {
+		if ((SYMBOL(log_first_idx) == NOT_FOUND_SYMBOL)
+		    || (SYMBOL(log_next_idx) == NOT_FOUND_SYMBOL)) {
+			ERRMSG("Can't find variable-length record symbols");
+			return FALSE;
+		} else {
+			if (!readmem(VADDR, SYMBOL(log_first_idx), &log_first_idx,
+			    sizeof(log_first_idx))) {
+				ERRMSG("Can't get log_first_idx.\n");
+				return FALSE;
+			}
+			if (!readmem(VADDR, SYMBOL(log_next_idx), &log_next_idx,
+			    sizeof(log_next_idx))) {
+				ERRMSG("Can't get log_next_idx.\n");
+				return FALSE;
+			}
+		}
 	}
 	if (!readmem(VADDR, SYMBOL(log_buf), &log_buf, sizeof(log_buf))) {
 		ERRMSG("Can't get log_buf.\n");
 		return FALSE;
 	}
-	if (info->kernel_version >= KERNEL_VERSION(2, 6, 25)) {
-		if (!readmem(VADDR, SYMBOL(log_end), &log_end_2_6_25,
-		    sizeof(log_end_2_6_25))) {
-			ERRMSG("Can't to get log_end.\n");
-			return FALSE;
+	if (info->kernel_version < KERNEL_VERSION(3, 5, 0)) {
+		if (info->kernel_version >= KERNEL_VERSION(2, 6, 25)) {
+			if (!readmem(VADDR, SYMBOL(log_end), &log_end_2_6_25,
+			    sizeof(log_end_2_6_25))) {
+				ERRMSG("Can't to get log_end.\n");
+				return FALSE;
+			}
+			log_end = log_end_2_6_25;
+		} else {
+			if (!readmem(VADDR, SYMBOL(log_end), &log_end_2_6_24,
+			    sizeof(log_end_2_6_24))) {
+				ERRMSG("Can't to get log_end.\n");
+				return FALSE;
+			}
+			log_end = log_end_2_6_24;
 		}
-		log_end = log_end_2_6_25;
-	} else {
-		if (!readmem(VADDR, SYMBOL(log_end), &log_end_2_6_24,
-		    sizeof(log_end_2_6_24))) {
-			ERRMSG("Can't to get log_end.\n");
-			return FALSE;
-		}
-		log_end = log_end_2_6_24;
-	}
+	} else
+		log_end = 0;
+
 	if (!readmem(VADDR, SYMBOL(log_buf_len), &log_buf_len,
 	    sizeof(log_buf_len))) {
 		ERRMSG("Can't get log_buf_len.\n");
 		return FALSE;
 	}
 	DEBUG_MSG("\n");
-	DEBUG_MSG("log_buf      : %lx\n", log_buf);
-	DEBUG_MSG("log_end      : %lx\n", log_end);
-	DEBUG_MSG("log_buf_len  : %d\n", log_buf_len);
+	DEBUG_MSG("log_buf       : %lx\n", log_buf);
+	DEBUG_MSG("log_end       : %lx\n", log_end);
+	DEBUG_MSG("log_buf_len   : %d\n", log_buf_len);
+	DEBUG_MSG("log_first_idx : %u\n", log_first_idx);
+	DEBUG_MSG("log_next_idx  : %u\n", log_next_idx);
 
 	if ((log_buffer = malloc(log_buf_len)) == NULL) {
 		ERRMSG("Can't allocate memory for log_buf. %s\n",
-		    strerror(errno));
+			   strerror(errno));
 		return FALSE;
 	}
 
-	if (log_end < log_buf_len) {
-		length_log = log_end;
-		if(!readmem(VADDR, log_buf, log_buffer, length_log)) {
-			ERRMSG("Can't read dmesg log.\n");
+	if (info->kernel_version < KERNEL_VERSION(3, 5, 0)) {
+		if (log_end < log_buf_len) {
+			length_log = log_end;
+			if (!readmem(VADDR, log_buf, log_buffer, length_log)) {
+				ERRMSG("Can't read dmesg log.\n");
+				goto out;
+			}
+		} else {
+			index = log_end & (log_buf_len - 1);
+			DEBUG_MSG("index        : %lx\n", index);
+			length_log = log_buf_len;
+			length_oldlog = log_buf_len - index;
+			if (!readmem(VADDR, log_buf + index, log_buffer, length_oldlog)) {
+				ERRMSG("Can't read old dmesg log.\n");
+				goto out;
+			}
+			if (!readmem(VADDR, log_buf, log_buffer + length_oldlog, index)) {
+				ERRMSG("Can't read new dmesg log.\n");
+				goto out;
+			}
+		}
+		DEBUG_MSG("length_log   : %d\n", length_log);
+
+		if (!open_dump_file()) {
+			ERRMSG("Can't open output file.\n");
 			goto out;
 		}
+		if (write(info->fd_dumpfile, log_buffer, length_log) < 0)
+			goto out;
+
+		if (!close_files_for_creating_dumpfile())
+			goto out;
 	} else {
-		index = log_end & (log_buf_len - 1);
-		DEBUG_MSG("index        : %lx\n", index);
-		length_log = log_buf_len;
-		length_oldlog = log_buf_len - index;
-		if(!readmem(VADDR, log_buf + index, log_buffer, length_oldlog)) {
-			ERRMSG("Can't read old dmesg log.\n");
+		if (!readmem(VADDR, log_buf, log_buffer, log_buf_len)) {
+			ERRMSG("Can't read indexed dmesg log.\n");
 			goto out;
 		}
-		if(!readmem(VADDR, log_buf, log_buffer + length_oldlog, index)) {
-			ERRMSG("Can't read new dmesg log.\n");
+		if (!open_dump_file()) {
+			ERRMSG("Can't open output file.\n");
 			goto out;
 		}
+		idx = log_first_idx;
+		while (idx != log_next_idx) {
+			log_ptr = log_from_idx(idx, log_buffer);
+			if (!dump_log_entry(log_ptr, info->fd_dumpfile))
+				goto out;
+			idx = log_next(idx, log_buffer);
+		}
+		if (!close_files_for_creating_dumpfile())
+			goto out;
 	}
-	DEBUG_MSG("length_log   : %d\n", length_log);
-
-	if (!open_dump_file()) {
-		ERRMSG("Can't open output file.\n");
-		goto out;
-	}
-	if (write(info->fd_dumpfile, log_buffer, length_log) < 0)
-		goto out;
-
-	if (!close_files_for_creating_dumpfile())
-		goto out;
 
 	ret = TRUE;
 out:
@@ -3451,6 +3817,10 @@ exclude_free_page(void)
 		ERRMSG("Can't get necessary structures for excluding free pages.\n");
 		return FALSE;
 	}
+	if (is_xen_memory() && !info->dom0_mapnr) {
+		ERRMSG("Can't get max domain-0 PFN for excluding free pages.\n");
+		return FALSE;
+	}
 
 	/*
 	 * Detect free pages and update 2nd-bitmap.
@@ -3459,6 +3829,110 @@ exclude_free_page(void)
 		return FALSE;
 
 	return TRUE;
+}
+
+/*
+ * Let C be a cyclic buffer size and B a bitmap size used for
+ * representing maximum block size managed by buddy allocator.
+ *
+ * For some combinations of C and B, clearing operation can overrun
+ * the cyclic buffer. Let's consider three cases.
+ *
+ *   - If C == B, this is trivially safe.
+ *
+ *   - If B > C, overrun can easily happen.
+ *
+ *   - In case of C > B, if C mod B != 0, then there exist n > m > 0,
+ *     B > b > 0 such that n x C = m x B + b. This means that clearing
+ *     operation overruns cyclic buffer (B - b)-bytes in the
+ *     combination of n-th cycle and m-th block.
+ *
+ *     Note that C mod B != 0 iff (m x C) mod B != 0 for some m.
+ *
+ * If C == B, C mod B == 0 always holds. Again, if B > C, C mod B != 0
+ * always holds. Hence, it's always sufficient to check the condition
+ * C mod B != 0 in order to determine whether overrun can happen or
+ * not.
+ *
+ * The bitmap size used for maximum block size B is calculated from
+ * MAX_ORDER as:
+ *
+ *   B := DIVIDE_UP((1 << (MAX_ORDER - 1)), BITS_PER_BYTE)
+ *
+ * Normally, MAX_ORDER is 11 at default. This is configurable through
+ * CONFIG_FORCE_MAX_ZONEORDER.
+ */
+static void
+check_cyclic_buffer_overrun(void)
+{
+	int max_order = ARRAY_LENGTH(zone.free_area);
+	int max_order_nr_pages = 1 << (max_order - 1);
+	unsigned long max_block_size = roundup(max_order_nr_pages, BITPERBYTE);
+
+	if (info->bufsize_cyclic %
+	    roundup(max_order_nr_pages, BITPERBYTE)) {
+		unsigned long bufsize;
+
+		if (max_block_size > info->bufsize_cyclic) {
+			MSG("WARNING: some free pages are not filtered.\n");
+			return;
+		}
+
+		bufsize = info->bufsize_cyclic;
+		info->bufsize_cyclic = round(bufsize, max_block_size);
+
+		MSG("cyclic buffer size has been changed: %lu => %lu\n",
+		    bufsize, info->bufsize_cyclic);
+	}
+}
+
+/*
+ * For the kernel versions from v2.6.17 to v2.6.37.
+ */
+static int
+page_is_buddy_v2(unsigned long flags, unsigned int _mapcount,
+			unsigned long private, unsigned int _count)
+{
+	if (flags & (1UL << NUMBER(PG_buddy)))
+		return TRUE;
+
+	return FALSE;
+}
+
+/*
+ * For v2.6.38 and later kernel versions.
+ */
+static int
+page_is_buddy_v3(unsigned long flags, unsigned int _mapcount,
+			unsigned long private, unsigned int _count)
+{
+	if (flags & (1UL << NUMBER(PG_slab)))
+		return FALSE;
+
+	if (_mapcount == (int)NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE))
+		return TRUE;
+
+	return FALSE;
+}
+
+static void
+setup_page_is_buddy(void)
+{
+	if (OFFSET(page.private) == NOT_FOUND_STRUCTURE)
+		goto out;
+
+	if (NUMBER(PG_buddy) == NOT_FOUND_NUMBER) {
+		if (NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE) != NOT_FOUND_NUMBER) {
+			if (OFFSET(page._mapcount) != NOT_FOUND_STRUCTURE)
+				info->page_is_buddy = page_is_buddy_v3;
+		}
+	} else
+		info->page_is_buddy = page_is_buddy_v2;
+
+out:
+	if (!info->page_is_buddy)
+		DEBUG_MSG("Can't select page_is_buddy handler; "
+			  "follow free lists instead of mem_map array.\n");
 }
 
 /*
@@ -3576,6 +4050,39 @@ create_1st_bitmap(void)
 	return TRUE;
 }
 
+int
+create_1st_bitmap_cyclic()
+{
+	int i;
+	unsigned long long pfn, pfn_bitmap1;
+	unsigned long long phys_start, phys_end;
+	unsigned long long pfn_start, pfn_end;
+
+	/*
+	 * At first, clear all the bits on the 1st-bitmap.
+	 */
+	initialize_bitmap_cyclic(info->partial_bitmap1);
+
+	/*
+	 * If page is on memory hole, set bit on the 1st-bitmap.
+	 */
+	pfn_bitmap1 = 0;
+	for (i = 0; get_pt_load(i, &phys_start, &phys_end, NULL, NULL); i++) {
+		pfn_start = paddr_to_pfn(phys_start);
+		pfn_end   = paddr_to_pfn(phys_end);
+
+		if (!is_in_segs(pfn_to_paddr(pfn_start)))
+			pfn_start++;
+		for (pfn = pfn_start; pfn < pfn_end; pfn++) {
+			if (set_bit_on_1st_bitmap(pfn))
+				pfn_bitmap1++;
+		}
+	}
+	pfn_memhole -= pfn_bitmap1;
+
+	return TRUE;
+}
+
 /*
  * Exclude the page filled with zero in case of creating an elf dumpfile.
  */
@@ -3616,8 +4123,8 @@ exclude_zero_pages(void)
 			}
 		}
 		if (is_zero_page(buf, info->page_size)) {
-			clear_bit_on_2nd_bitmap(pfn);
-			pfn_zero++;
+			if (clear_bit_on_2nd_bitmap(pfn))
+				pfn_zero++;
 		}
 	}
 
@@ -3638,8 +4145,8 @@ __exclude_unnecessary_pages(unsigned long mem_map,
 	unsigned long long pfn_read_start, pfn_read_end, index_pg;
 	unsigned char page_cache[SIZE(page) * PGMM_CACHED];
 	unsigned char *pcache;
-	unsigned int _count;
-	unsigned long flags, mapping;
+	unsigned int _count, _mapcount = 0;
+	unsigned long flags, mapping, private = 0;
 
 	/*
 	 * Refresh the buffer of struct page, when changing mem_map.
@@ -3648,6 +4155,12 @@ __exclude_unnecessary_pages(unsigned long mem_map,
 	pfn_read_end   = 0;
 
 	for (pfn = pfn_start; pfn < pfn_end; pfn++, mem_map += SIZE(page)) {
+
+		/*
+		 * If this pfn doesn't belong to target region, skip this pfn.
+		 */
+		if (info->flag_cyclic && !is_cyclic_region(pfn))
+			continue;
 
 		/*
 		 * Exclude the memory hole.
@@ -3687,15 +4200,42 @@ __exclude_unnecessary_pages(unsigned long mem_map,
 		flags   = ULONG(pcache + OFFSET(page.flags));
 		_count  = UINT(pcache + OFFSET(page._count));
 		mapping = ULONG(pcache + OFFSET(page.mapping));
+		if (OFFSET(page._mapcount) != NOT_FOUND_STRUCTURE)
+			_mapcount = UINT(pcache + OFFSET(page._mapcount));
+		if (OFFSET(page.private) != NOT_FOUND_STRUCTURE)
+			private = ULONG(pcache + OFFSET(page.private));
 
+		/*
+		 * Exclude the free page managed by a buddy
+		 */
+		if ((info->dump_level & DL_EXCLUDE_FREE)
+		    && info->flag_cyclic
+		    && info->page_is_buddy
+		    && info->page_is_buddy(flags, _mapcount, private, _count)) {
+			int i;
+
+			for (i = 0; i < (1 << private); ++i) {
+				/*
+				 * According to combination of
+				 * MAX_ORDER and size of cyclic
+				 * buffer, this clearing bit operation
+				 * can overrun the cyclic buffer.
+				 *
+				 * See check_cyclic_buffer_overrun()
+				 * for the detail.
+				 */
+				clear_bit_on_2nd_bitmap_for_kernel(pfn + i);
+			}
+			pfn_free += i;
+		}
 		/*
 		 * Exclude the cache page without the private page.
 		 */
-		if ((info->dump_level & DL_EXCLUDE_CACHE)
+		else if ((info->dump_level & DL_EXCLUDE_CACHE)
 		    && (isLRU(flags) || isSwapCache(flags))
 		    && !isPrivate(flags) && !isAnon(mapping)) {
-			clear_bit_on_2nd_bitmap_for_kernel(pfn);
-			pfn_cache++;
+			if (clear_bit_on_2nd_bitmap_for_kernel(pfn))
+				pfn_cache++;
 		}
 		/*
 		 * Exclude the cache page with the private page.
@@ -3703,16 +4243,23 @@ __exclude_unnecessary_pages(unsigned long mem_map,
 		else if ((info->dump_level & DL_EXCLUDE_CACHE_PRI)
 		    && (isLRU(flags) || isSwapCache(flags))
 		    && !isAnon(mapping)) {
-			clear_bit_on_2nd_bitmap_for_kernel(pfn);
-			pfn_cache_private++;
+			if (clear_bit_on_2nd_bitmap_for_kernel(pfn))
+				pfn_cache_private++;
 		}
 		/*
 		 * Exclude the data page of the user process.
 		 */
 		else if ((info->dump_level & DL_EXCLUDE_USER_DATA)
 		    && isAnon(mapping)) {
-			clear_bit_on_2nd_bitmap_for_kernel(pfn);
-			pfn_user++;
+			if (clear_bit_on_2nd_bitmap_for_kernel(pfn))
+				pfn_user++;
+		}
+		/*
+		 * Exclude the hwpoison page.
+		 */
+		else if (isHWPOISON(flags)) {
+			if (clear_bit_on_2nd_bitmap_for_kernel(pfn))
+				pfn_hwpoison++;
 		}
 	}
 	return TRUE;
@@ -3724,6 +4271,11 @@ exclude_unnecessary_pages(void)
 	unsigned int mm;
 	struct mem_map_data *mmd;
 	struct timeval tv_start;
+
+	if (is_xen_memory() && !info->dom0_mapnr) {
+		ERRMSG("Can't get max domain-0 PFN for excluding pages.\n");
+		return FALSE;
+	}
 
 	gettimeofday(&tv_start, NULL);
 
@@ -3745,6 +4297,88 @@ exclude_unnecessary_pages(void)
 	 */
 	print_progress(PROGRESS_UNN_PAGES, info->num_mem_map, info->num_mem_map);
 	print_execution_time(PROGRESS_UNN_PAGES, &tv_start);
+
+	return TRUE;
+}
+
+void
+copy_bitmap_cyclic(void)
+{
+	memcpy(info->partial_bitmap2, info->partial_bitmap1, info->bufsize_cyclic);
+}
+
+int
+exclude_unnecessary_pages_cyclic(void)
+{
+	unsigned int mm;
+	struct mem_map_data *mmd;
+	struct timeval tv_start;
+
+	/*
+	 * Copy 1st-bitmap to 2nd-bitmap.
+	 */
+	copy_bitmap_cyclic();
+
+	if ((info->dump_level & DL_EXCLUDE_FREE) && !info->page_is_buddy)
+		if (!exclude_free_page())
+			return FALSE;
+
+	/*
+	 * Exclude cache pages, cache private pages, user data pages,
+	 * free pages and hwpoison pages.
+	 */
+	if (info->dump_level & DL_EXCLUDE_CACHE ||
+	    info->dump_level & DL_EXCLUDE_CACHE_PRI ||
+	    info->dump_level & DL_EXCLUDE_USER_DATA ||
+	    NUMBER(PG_hwpoison) != NOT_FOUND_NUMBER ||
+	    ((info->dump_level & DL_EXCLUDE_FREE) && info->page_is_buddy)) {
+
+		gettimeofday(&tv_start, NULL);
+
+		for (mm = 0; mm < info->num_mem_map; mm++) {
+
+			print_progress(PROGRESS_UNN_PAGES, mm, info->num_mem_map);
+
+			mmd = &info->mem_map_data[mm];
+
+			if (mmd->mem_map == NOT_MEMMAP_ADDR)
+				continue;
+
+			if (mmd->pfn_end >= info->cyclic_start_pfn &&
+			    mmd->pfn_start <= info->cyclic_end_pfn) {
+				if (!__exclude_unnecessary_pages(mmd->mem_map,
+								 mmd->pfn_start, mmd->pfn_end))
+					return FALSE;
+			}
+		}
+
+		/*
+		 * print [100 %]
+		 */
+		print_progress(PROGRESS_UNN_PAGES, info->num_mem_map, info->num_mem_map);
+		print_execution_time(PROGRESS_UNN_PAGES, &tv_start);
+	}
+
+	return TRUE;
+}
+
+int
+update_cyclic_region(unsigned long long pfn)
+{
+	if (is_cyclic_region(pfn))
+		return TRUE;
+
+	info->cyclic_start_pfn = round(pfn, info->pfn_cyclic);
+	info->cyclic_end_pfn = info->cyclic_start_pfn + info->pfn_cyclic;
+
+	if (info->cyclic_end_pfn > info->max_mapnr)
+		info->cyclic_end_pfn = info->max_mapnr;
+
+	if (!create_1st_bitmap_cyclic())
+		return FALSE;
+
+	if (!exclude_unnecessary_pages_cyclic())
+		return FALSE;
 
 	return TRUE;
 }
@@ -3798,11 +4432,13 @@ create_2nd_bitmap(void)
 	}
 
 	/*
-	 * Exclude cache pages, cache private pages, user data pages.
+	 * Exclude cache pages, cache private pages, user data pages,
+	 * and hwpoison pages.
 	 */
 	if (info->dump_level & DL_EXCLUDE_CACHE ||
 	    info->dump_level & DL_EXCLUDE_CACHE_PRI ||
-	    info->dump_level & DL_EXCLUDE_USER_DATA) {
+	    info->dump_level & DL_EXCLUDE_USER_DATA ||
+	    NUMBER(PG_hwpoison) != NOT_FOUND_NUMBER) {
 		if (!exclude_unnecessary_pages()) {
 			ERRMSG("Can't exclude unnecessary pages.\n");
 			return FALSE;
@@ -3890,6 +4526,38 @@ prepare_bitmap_buffer(void)
 	return TRUE;
 }
 
+int
+prepare_bitmap_buffer_cyclic(void)
+{
+	unsigned long tmp;
+
+	/*
+	 * Create 2 bitmaps (1st-bitmap & 2nd-bitmap) on block_size boundary.
+	 * The crash utility requires both of them to be aligned to block_size
+	 * boundary.
+	 */
+	tmp = divideup(divideup(info->max_mapnr, BITPERBYTE), info->page_size);
+	info->len_bitmap = tmp*info->page_size*2;
+
+	/*
+	 * Prepare partial bitmap buffers for cyclic processing.
+	 */
+	if ((info->partial_bitmap1 = (char *)malloc(info->bufsize_cyclic)) == NULL) {
+		ERRMSG("Can't allocate memory for the 1st-bitmap. %s\n",
+		       strerror(errno));
+		return FALSE;
+	}
+	if ((info->partial_bitmap2 = (char *)malloc(info->bufsize_cyclic)) == NULL) {
+		ERRMSG("Can't allocate memory for the 2nd-bitmap. %s\n",
+		       strerror(errno));
+		return FALSE;
+	}
+	initialize_bitmap_cyclic(info->partial_bitmap1);
+	initialize_bitmap_cyclic(info->partial_bitmap2);
+
+	return TRUE;
+}
+
 void
 free_bitmap_buffer(void)
 {
@@ -3910,14 +4578,21 @@ create_dump_bitmap(void)
 {
 	int ret = FALSE;
 
-	if (!prepare_bitmap_buffer())
-		goto out;
+	if (info->flag_cyclic) {
+		if (!prepare_bitmap_buffer_cyclic())
+			goto out;
 
-	if (!create_1st_bitmap())
-		goto out;
+		info->num_dumpable = get_num_dumpable_cyclic();
+	} else {
+		if (!prepare_bitmap_buffer())
+			goto out;
 
-	if (!create_2nd_bitmap())
-		goto out;
+		if (!create_1st_bitmap())
+			goto out;
+
+		if (!create_2nd_bitmap())
+			goto out;
+	}
 
 	ret = TRUE;
 out:
@@ -4102,9 +4777,16 @@ write_elf_header(struct cache_data *cd_header)
 	/*
 	 * Get the PT_LOAD number of the dumpfile.
 	 */
-	if (!(num_loads_dumpfile = get_loads_dumpfile())) {
-		ERRMSG("Can't get a number of PT_LOAD.\n");
-		goto out;
+	if (info->flag_cyclic) {
+		if (!(num_loads_dumpfile = get_loads_dumpfile_cyclic())) {
+			ERRMSG("Can't get a number of PT_LOAD.\n");
+			goto out;
+		}
+	} else {
+		if (!(num_loads_dumpfile = get_loads_dumpfile())) {
+			ERRMSG("Can't get a number of PT_LOAD.\n");
+			goto out;
+		}
 	}
 
 	if (is_elf64_memory()) { /* ELF64 */
@@ -4369,6 +5051,21 @@ get_num_dumpable(void)
 	return num_dumpable;
 }
 
+unsigned long long
+get_num_dumpable_cyclic(void)
+{
+	unsigned long long pfn, num_dumpable=0;
+
+	for (pfn = 0; pfn < info->max_mapnr; pfn++) {
+		if (!update_cyclic_region(pfn))
+			return FALSE;
+
+		if (is_dumpable_cyclic(info->partial_bitmap2, pfn))
+			num_dumpable++;
+	}
+
+	return num_dumpable;
+}
 
 int
 write_elf_load_segment(struct cache_data *cd_page, unsigned long long paddr,
@@ -4417,7 +5114,7 @@ write_elf_pages(struct cache_data *cd_header, struct cache_data *cd_page)
 	int i, phnum;
 	long page_size = info->page_size;
 	unsigned long long pfn, pfn_start, pfn_end, paddr, num_excluded;
-	unsigned long long num_dumpable, num_dumped = 0, per;
+	unsigned long long num_dumpable, per;
 	unsigned long long memsz, filesz;
 	unsigned long frac_head, frac_tail;
 	off_t off_seg_load, off_memory;
@@ -4672,9 +5369,325 @@ read_pfn(unsigned long long pfn, unsigned char *buf)
 }
 
 int
+get_loads_dumpfile_cyclic(void)
+{
+	int i, phnum, num_new_load = 0;
+	long page_size = info->page_size;
+	unsigned char buf[info->page_size];
+	unsigned long long pfn, pfn_start, pfn_end, num_excluded;
+	unsigned long long paddr;
+	unsigned long frac_head, frac_tail;
+	Elf64_Phdr load;
+
+	/*
+	 * Initialize target region and bitmap.
+	 */
+	info->cyclic_start_pfn = 0;
+	info->cyclic_end_pfn = info->pfn_cyclic;
+	if (!create_1st_bitmap_cyclic())
+		return FALSE;
+	if (!exclude_unnecessary_pages_cyclic())
+		return FALSE;
+
+	if (!(phnum = get_phnum_memory()))
+		return FALSE;
+
+	for (i = 0; i < phnum; i++) {
+		if (!get_phdr_memory(i, &load))
+			return FALSE;
+		if (load.p_type != PT_LOAD)
+			continue;
+
+		pfn_start = paddr_to_pfn(load.p_paddr);
+		pfn_end = paddr_to_pfn(load.p_paddr + load.p_memsz);
+		frac_head = page_size - (load.p_paddr % page_size);
+		frac_tail = (load.p_paddr + load.p_memsz) % page_size;
+
+		num_new_load++;
+		num_excluded = 0;
+
+		if (frac_head && (frac_head != page_size))
+			pfn_start++;
+		if (frac_tail)
+			pfn_end++;
+
+		for (pfn = pfn_start; pfn < pfn_end; pfn++) {
+			/*
+			 * Update target region and bitmap
+			 */
+			if (!is_cyclic_region(pfn)) {
+				if (!update_cyclic_region(pfn))
+					return FALSE;
+			}
+
+			if (!is_dumpable_cyclic(info->partial_bitmap2, pfn)) {
+				num_excluded++;
+				continue;
+			}
+
+			/*
+			 * Exclude zero pages.
+			 */
+			if (info->dump_level & DL_EXCLUDE_ZERO) {
+				paddr = pfn_to_paddr(pfn);
+				if (!readmem(PADDR, paddr, buf, page_size)) {
+					ERRMSG("Can't get the page data(pfn:%llx,max_mapnr:%llx).\n",
+					       pfn, info->max_mapnr);
+					return FALSE;
+				}
+				if (is_zero_page(buf, page_size)) {
+					num_excluded++;
+					continue;
+				}
+			}
+
+			info->num_dumpable++;
+
+			/*
+			 * If the number of the contiguous pages to be excluded
+			 * is 256 or more, those pages are excluded really.
+			 * And a new PT_LOAD segment is created.
+			 */
+			if (num_excluded >= PFN_EXCLUDED) {
+				num_new_load++;
+			}
+			num_excluded = 0;
+		}
+	}
+	return num_new_load;
+}
+
+int
+write_elf_pages_cyclic(struct cache_data *cd_header, struct cache_data *cd_page)
+{
+	int i, phnum;
+	long page_size = info->page_size;
+	unsigned char buf[info->page_size];
+	unsigned long long pfn, pfn_start, pfn_end, paddr, num_excluded;
+	unsigned long long paddr_buf;
+	unsigned long long num_dumpable, per;
+	unsigned long long memsz, filesz;
+	unsigned long frac_head, frac_tail;
+	off_t off_seg_load, off_memory;
+	Elf64_Phdr load;
+	struct timeval tv_start;
+
+	if (!info->flag_elf_dumpfile)
+		return FALSE;
+
+	num_dumpable = info->num_dumpable;
+	per = num_dumpable / 100;
+
+	off_seg_load   = info->offset_load_dumpfile;
+	cd_page->offset = info->offset_load_dumpfile;
+
+	/*
+	 * Reset counter for debug message.
+	 */
+	pfn_zero = pfn_cache = pfn_cache_private = 0;
+	pfn_user = pfn_free = pfn_hwpoison = 0;
+	pfn_memhole = info->max_mapnr;
+
+	info->cyclic_start_pfn = 0;
+	info->cyclic_end_pfn = 0;
+	if (!update_cyclic_region(0))
+		return FALSE;
+
+	if (!(phnum = get_phnum_memory()))
+		return FALSE;
+
+	gettimeofday(&tv_start, NULL);
+
+	for (i = 0; i < phnum; i++) {
+		if (!get_phdr_memory(i, &load))
+			return FALSE;
+
+		if (load.p_type != PT_LOAD)
+			continue;
+
+		off_memory= load.p_offset;
+		paddr = load.p_paddr;
+		pfn_start = paddr_to_pfn(load.p_paddr);
+		pfn_end = paddr_to_pfn(load.p_paddr + load.p_memsz);
+		frac_head = page_size - (load.p_paddr % page_size);
+		frac_tail = (load.p_paddr + load.p_memsz)%page_size;
+
+		num_excluded = 0;
+		memsz  = 0;
+		filesz = 0;
+		if (frac_head && (frac_head != page_size)) {
+			memsz  = frac_head;
+			filesz = frac_head;
+			pfn_start++;
+		}
+
+		if (frac_tail)
+			pfn_end++;
+
+		for (pfn = pfn_start; pfn < pfn_end; pfn++) {
+			/*
+			 * Update target region and partial bitmap if necessary.
+			 */
+			if (!update_cyclic_region(pfn))
+				return FALSE;
+
+			if (!is_dumpable_cyclic(info->partial_bitmap2, pfn)) {
+				num_excluded++;
+				if ((pfn == pfn_end - 1) && frac_tail)
+					memsz += frac_tail;
+				else
+					memsz += page_size;
+				continue;
+			}
+
+			/*
+			 * Exclude zero pages.
+			 */
+			if (info->dump_level & DL_EXCLUDE_ZERO) {
+				paddr_buf = pfn_to_paddr(pfn);
+				if (!readmem(PADDR, paddr_buf, buf, page_size)) {
+					ERRMSG("Can't get the page data(pfn:%llx max_mapnr:%llx).\n",
+					       pfn, info->max_mapnr);
+					return FALSE;
+				}
+				if (is_zero_page(buf, page_size)) {
+					pfn_zero++;
+					num_excluded++;
+					if ((pfn == pfn_end - 1) && frac_tail)
+						memsz += frac_tail;
+					else
+						memsz += page_size;
+					continue;
+				}
+			}
+
+			if ((num_dumped % per) == 0)
+				print_progress(PROGRESS_COPY, num_dumped, num_dumpable);
+
+			num_dumped++;
+
+			/*
+			 * The dumpable pages are continuous.
+			 */
+			if (!num_excluded) {
+				if ((pfn == pfn_end - 1) && frac_tail) {
+					memsz  += frac_tail;
+					filesz += frac_tail;
+				} else {
+					memsz  += page_size;
+					filesz += page_size;
+				}
+				continue;
+				/*
+				 * If the number of the contiguous pages to be excluded
+				 * is 255 or less, those pages are not excluded.
+				 */
+			} else if (num_excluded < PFN_EXCLUDED) {
+				if ((pfn == pfn_end - 1) && frac_tail) {
+					memsz  += frac_tail;
+					filesz += (page_size*num_excluded
+						   + frac_tail);
+				}else {
+					memsz  += page_size;
+					filesz += (page_size*num_excluded
+						   + page_size);
+				}
+				num_excluded = 0;
+				continue;
+			}
+
+			/*
+			 * If the number of the contiguous pages to be excluded
+			 * is 256 or more, those pages are excluded really.
+			 * And a new PT_LOAD segment is created.
+			 */
+			load.p_memsz = memsz;
+			load.p_filesz = filesz;
+			if (load.p_filesz)
+				load.p_offset = off_seg_load;
+			else
+				/*
+				 * If PT_LOAD segment does not have real data
+				 * due to the all excluded pages, the file
+				 * offset is not effective and it should be 0.
+				 */
+				load.p_offset = 0;
+
+			/*
+			 * Write a PT_LOAD header.
+			 */
+			if (!write_elf_phdr(cd_header, &load))
+				return FALSE;
+
+			/*
+			 * Write a PT_LOAD segment.
+			 */
+			if (load.p_filesz)
+				if (!write_elf_load_segment(cd_page, paddr,
+							    off_memory, load.p_filesz))
+					return FALSE;
+
+			load.p_paddr += load.p_memsz;
+#ifdef __x86__
+			/*
+			 * FIXME:
+			 *  (x86) Fill PT_LOAD headers with appropriate
+			 * virtual addresses.
+			 */
+			if (load.p_paddr < MAXMEM)
+				load.p_vaddr += load.p_memsz;
+#else
+			load.p_vaddr += load.p_memsz;
+#endif /* x86 */
+			paddr  = load.p_paddr;
+			off_seg_load += load.p_filesz;
+
+			num_excluded = 0;
+			memsz  = page_size;
+			filesz = page_size;
+		}
+		/*
+		 * Write the last PT_LOAD.
+		 */
+		load.p_memsz = memsz;
+		load.p_filesz = filesz;
+		load.p_offset = off_seg_load;
+
+		/*
+		 * Write a PT_LOAD header.
+		 */
+		if (!write_elf_phdr(cd_header, &load))
+			return FALSE;
+
+		/*
+		 * Write a PT_LOAD segment.
+		 */
+		if (load.p_filesz)
+			if (!write_elf_load_segment(cd_page, paddr,
+						    off_memory, load.p_filesz))
+				return FALSE;
+
+		off_seg_load += load.p_filesz;
+	}
+	if (!write_cache_bufsz(cd_header))
+		return FALSE;
+	if (!write_cache_bufsz(cd_page))
+		return FALSE;
+
+	/*
+	 * print [100 %]
+	 */
+	print_progress(PROGRESS_COPY, num_dumpable, num_dumpable);
+	print_execution_time(PROGRESS_COPY, &tv_start);
+	PROGRESS_MSG("\n");
+
+	return TRUE;
+}
+
+int
 write_kdump_pages(struct cache_data *cd_header, struct cache_data *cd_page)
 {
- 	unsigned long long pfn, per, num_dumpable, num_dumped = 0;
+ 	unsigned long long pfn, per, num_dumpable;
 	unsigned long long start_pfn, end_pfn;
 	unsigned long size_out;
 	struct page_desc pd, pd_zero;
@@ -4685,6 +5698,7 @@ write_kdump_pages(struct cache_data *cd_header, struct cache_data *cd_page)
 	struct dump_bitmap bitmap2;
 	struct timeval tv_start;
 	const off_t failed = (off_t)-1;
+	unsigned long len_buf_out_zlib, len_buf_out_lzo, len_buf_out_snappy;
 
 	int ret = FALSE;
 
@@ -4693,7 +5707,30 @@ write_kdump_pages(struct cache_data *cd_header, struct cache_data *cd_page)
 
 	initialize_2nd_bitmap(&bitmap2);
 
-	len_buf_out = compressBound(info->page_size);
+	len_buf_out_zlib = len_buf_out_lzo = len_buf_out_snappy = 0;
+
+#ifdef USELZO
+	lzo_bytep wrkmem;
+
+	if ((wrkmem = malloc(LZO1X_1_MEM_COMPRESS)) == NULL) {
+		ERRMSG("Can't allocate memory for the working memory. %s\n",
+		       strerror(errno));
+		goto out;
+	}
+
+	len_buf_out_lzo = info->page_size + info->page_size / 16 + 64 + 3;
+#endif
+
+#ifdef USESNAPPY
+	len_buf_out_snappy = snappy_max_compressed_length(info->page_size);
+#endif
+
+	len_buf_out_zlib = compressBound(info->page_size);
+	
+	len_buf_out = MAX(len_buf_out_zlib,
+			  MAX(len_buf_out_lzo,
+			      len_buf_out_snappy));
+
 	if ((buf_out = malloc(len_buf_out)) == NULL) {
 		ERRMSG("Can't allocate memory for the compression buffer. %s\n",
 		    strerror(errno));
@@ -4775,13 +5812,37 @@ write_kdump_pages(struct cache_data *cd_header, struct cache_data *cd_page)
 		 * Compress the page data.
 		 */
 		size_out = len_buf_out;
-		if (info->flag_compress
-		    && (compress2(buf_out, &size_out, buf,
-		    info->page_size, Z_BEST_SPEED) == Z_OK)
+		if ((info->flag_compress & DUMP_DH_COMPRESSED_ZLIB)
+		    && ((size_out = len_buf_out),
+			compress2(buf_out, &size_out, buf, info->page_size,
+				  Z_BEST_SPEED) == Z_OK)
 		    && (size_out < info->page_size)) {
-			pd.flags = 1;
+			pd.flags = DUMP_DH_COMPRESSED_ZLIB;
 			pd.size  = size_out;
 			memcpy(buf, buf_out, pd.size);
+#ifdef USELZO
+		} else if (info->flag_lzo_support
+			   && (info->flag_compress & DUMP_DH_COMPRESSED_LZO)
+			   && ((size_out = info->page_size),
+			       lzo1x_1_compress(buf, info->page_size, buf_out,
+						&size_out, wrkmem) == LZO_E_OK)
+			   && (size_out < info->page_size)) {
+			pd.flags = DUMP_DH_COMPRESSED_LZO;
+			pd.size  = size_out;
+			memcpy(buf, buf_out, pd.size);
+#endif
+#ifdef USESNAPPY
+		} else if ((info->flag_compress & DUMP_DH_COMPRESSED_SNAPPY)
+			   && ((size_out = len_buf_out_snappy),
+			       snappy_compress((char *)buf, info->page_size,
+					       (char *)buf_out,
+					       (size_t *)&size_out)
+			       == SNAPPY_OK)
+			   && (size_out < info->page_size)) {
+			pd.flags = DUMP_DH_COMPRESSED_SNAPPY;
+			pd.size  = size_out;
+			memcpy(buf, buf_out, pd.size);
+#endif
 		} else {
 			pd.flags = 0;
 			pd.size  = info->page_size;
@@ -4822,6 +5883,173 @@ write_kdump_pages(struct cache_data *cd_header, struct cache_data *cd_page)
 out:
 	if (buf_out != NULL)
 		free(buf_out);
+#ifdef USELZO
+	if (wrkmem != NULL)
+		free(wrkmem);
+#endif
+
+	return ret;
+}
+
+int
+write_kdump_pages_cyclic(struct cache_data *cd_header, struct cache_data *cd_page,
+			 struct page_desc *pd_zero, off_t *offset_data)
+{
+	unsigned long long pfn, per;
+	unsigned long long start_pfn, end_pfn;
+	unsigned long size_out;
+	struct page_desc pd;
+	unsigned char buf[info->page_size], *buf_out = NULL;
+	unsigned long len_buf_out;
+	const off_t failed = (off_t)-1;
+	unsigned long len_buf_out_zlib, len_buf_out_lzo, len_buf_out_snappy;
+
+	int ret = FALSE;
+
+	if (info->flag_elf_dumpfile)
+		return FALSE;
+
+	len_buf_out_zlib = len_buf_out_lzo = len_buf_out_snappy = 0;
+
+#ifdef USELZO
+	lzo_bytep wrkmem;
+
+	if ((wrkmem = malloc(LZO1X_1_MEM_COMPRESS)) == NULL) {
+		ERRMSG("Can't allocate memory for the working memory. %s\n",
+		       strerror(errno));
+		goto out;
+	}
+
+	len_buf_out_lzo = info->page_size + info->page_size / 16 + 64 + 3;
+#endif
+#ifdef USESNAPPY
+	len_buf_out_snappy = snappy_max_compressed_length(info->page_size);
+#endif
+
+	len_buf_out_zlib = compressBound(info->page_size);
+
+	len_buf_out = MAX(len_buf_out_zlib,
+			  MAX(len_buf_out_lzo,
+			      len_buf_out_snappy));
+
+	if ((buf_out = malloc(len_buf_out)) == NULL) {
+		ERRMSG("Can't allocate memory for the compression buffer. %s\n",
+		       strerror(errno));
+		goto out;
+	}
+
+	per = info->num_dumpable / 100;
+
+	/*
+	 * Set a fileoffset of Physical Address 0x0.
+	 */
+	if (lseek(info->fd_memory, get_offset_pt_load_memory(), SEEK_SET)
+	    == failed) {
+		ERRMSG("Can't seek the dump memory(%s). %s\n",
+		       info->name_memory, strerror(errno));
+		goto out;
+	}
+
+	start_pfn = info->cyclic_start_pfn;
+	end_pfn   = info->cyclic_end_pfn;
+
+	if (info->flag_split) {
+		if (start_pfn < info->split_start_pfn)
+			start_pfn = info->split_start_pfn;
+		if (end_pfn > info->split_end_pfn)
+			end_pfn = info->split_end_pfn;
+	}
+
+	for (pfn = start_pfn; pfn < end_pfn; pfn++) {
+
+		if ((num_dumped % per) == 0)
+			print_progress(PROGRESS_COPY, num_dumped, info->num_dumpable);
+
+		/*
+		 * Check the excluded page.
+		 */
+		if (!is_dumpable_cyclic(info->partial_bitmap2, pfn))
+			continue;
+
+		num_dumped++;
+
+		if (!read_pfn(pfn, buf))
+			goto out;
+
+		/*
+		 * Exclude the page filled with zeros.
+		 */
+		if ((info->dump_level & DL_EXCLUDE_ZERO)
+		    && is_zero_page(buf, info->page_size)) {
+			if (!write_cache(cd_header, pd_zero, sizeof(page_desc_t)))
+				goto out;
+			pfn_zero++;
+			continue;
+		}
+		/*
+		 * Compress the page data.
+		 */
+		size_out = len_buf_out;
+		if ((info->flag_compress & DUMP_DH_COMPRESSED_ZLIB)
+		    && ((size_out = len_buf_out),
+			compress2(buf_out, &size_out, buf, info->page_size,
+				  Z_BEST_SPEED) == Z_OK)
+		    && (size_out < info->page_size)) {
+			pd.flags = DUMP_DH_COMPRESSED_ZLIB;
+			pd.size  = size_out;
+			memcpy(buf, buf_out, pd.size);
+#ifdef USELZO
+		} else if (info->flag_lzo_support
+			   && (info->flag_compress & DUMP_DH_COMPRESSED_LZO)
+			   && ((size_out = info->page_size),
+			       lzo1x_1_compress(buf, info->page_size, buf_out,
+						&size_out, wrkmem) == LZO_E_OK)
+			   && (size_out < info->page_size)) {
+			pd.flags = DUMP_DH_COMPRESSED_LZO;
+			pd.size  = size_out;
+			memcpy(buf, buf_out, pd.size);
+#endif
+#ifdef USESNAPPY
+		} else if ((info->flag_compress & DUMP_DH_COMPRESSED_SNAPPY)
+			   && ((size_out = len_buf_out_snappy),
+			       snappy_compress((char *)buf, info->page_size,
+					       (char *)buf_out,
+					       (size_t *)&size_out)
+			       == SNAPPY_OK)
+			   && (size_out < info->page_size)) {
+			pd.flags = DUMP_DH_COMPRESSED_SNAPPY;
+			pd.size  = size_out;
+			memcpy(buf, buf_out, pd.size);
+#endif
+		} else {
+			pd.flags = 0;
+			pd.size  = info->page_size;
+		}
+		pd.page_flags = 0;
+		pd.offset     = *offset_data;
+		*offset_data  += pd.size;
+
+                /*
+                 * Write the page header.
+                 */
+                if (!write_cache(cd_header, &pd, sizeof(page_desc_t)))
+                        goto out;
+
+                /*
+                 * Write the page data.
+                 */
+                if (!write_cache(cd_page, buf, pd.size))
+                        goto out;
+        }
+
+	ret = TRUE;
+out:
+	if (buf_out != NULL)
+		free(buf_out);
+#ifdef USELZO
+	if (wrkmem != NULL)
+		free(wrkmem);
+#endif
 
 	return ret;
 }
@@ -5095,6 +6323,112 @@ out:
 	return ret;
 }
 
+int
+write_kdump_bitmap_cyclic(void)
+{
+	off_t offset;
+        int increment;
+	int ret = FALSE;
+
+	increment = divideup(info->cyclic_end_pfn - info->cyclic_start_pfn, BITPERBYTE);
+
+	if (info->flag_elf_dumpfile)
+		return FALSE;
+
+	offset = info->offset_bitmap1;
+	if (!write_buffer(info->fd_dumpfile, offset,
+			  info->partial_bitmap1, increment, info->name_dumpfile))
+		goto out;
+
+	offset += info->len_bitmap / 2;
+	if (!write_buffer(info->fd_dumpfile, offset,
+			  info->partial_bitmap2, increment, info->name_dumpfile))
+		goto out;
+
+	info->offset_bitmap1 += increment;
+
+	ret = TRUE;
+out:
+
+	return ret;
+}
+
+int
+write_kdump_pages_and_bitmap_cyclic(struct cache_data *cd_header, struct cache_data *cd_page)
+{
+	struct page_desc pd_zero;
+	off_t offset_data=0;
+	struct disk_dump_header *dh = info->dump_header;
+	unsigned char buf[info->page_size];
+	unsigned long long pfn;
+	struct timeval tv_start;
+
+	gettimeofday(&tv_start, NULL);
+
+	/*
+	 * Reset counter for debug message.
+	 */
+	pfn_zero = pfn_cache = pfn_cache_private = 0;
+	pfn_user = pfn_free = pfn_hwpoison = 0;
+	pfn_memhole = info->max_mapnr;
+
+	cd_header->offset
+		= (DISKDUMP_HEADER_BLOCKS + dh->sub_hdr_size + dh->bitmap_blocks)
+		* dh->block_size;
+	cd_page->offset = cd_header->offset + sizeof(page_desc_t)*info->num_dumpable;
+	offset_data = cd_page->offset;
+	
+	/*
+	 * Write the data of zero-filled page.
+	 */
+	if (info->dump_level & DL_EXCLUDE_ZERO) {
+		pd_zero.size = info->page_size;
+		pd_zero.flags = 0;
+		pd_zero.offset = offset_data;
+		pd_zero.page_flags = 0;
+		memset(buf, 0, pd_zero.size);
+		if (!write_cache(cd_page, buf, pd_zero.size))
+			return FALSE;
+		offset_data += pd_zero.size;
+	}
+
+	/*
+	 * Write pages and bitmap cyclically.
+	 */
+	info->cyclic_start_pfn = 0;
+	info->cyclic_end_pfn = 0;
+	for (pfn = 0; pfn < info->max_mapnr; pfn++) {
+		if (is_cyclic_region(pfn))
+			continue;
+
+		if (!update_cyclic_region(pfn))
+                        return FALSE;
+
+		if (!write_kdump_pages_cyclic(cd_header, cd_page, &pd_zero, &offset_data))
+			return FALSE;
+
+		if (!write_kdump_bitmap_cyclic())
+			return FALSE;
+        }
+
+	/*
+	 * Write the remainder.
+	 */
+	if (!write_cache_bufsz(cd_page))
+		return FALSE;
+	if (!write_cache_bufsz(cd_header))
+		return FALSE;
+
+	/*
+	 * print [100 %]
+	 */
+	print_progress(PROGRESS_COPY, num_dumped, info->num_dumpable);
+	print_execution_time(PROGRESS_COPY, &tv_start);
+	PROGRESS_MSG("\n");
+
+	return TRUE;
+}
+	
 void
 close_vmcoreinfo(void)
 {
@@ -5179,7 +6513,6 @@ close_files_for_rearranging_dumpdata(void)
 /*
  * Close the following files when it creates the dump file.
  * - dump mem
- * - dump file
  * - bit map
  * if it reads the vmcoreinfo file
  *   - vmcoreinfo file
@@ -5244,10 +6577,7 @@ get_structure_info_xen(void)
 {
 	SIZE_INIT(page_info, "page_info");
 	OFFSET_INIT(page_info.count_info, "page_info", "count_info");
-	/*
-	 * _domain is the first member of union u
-	 */
-	OFFSET_INIT(page_info._domain, "page_info", "u");
+	OFFSET_INIT(page_info._domain, "page_info", "_domain");
 
 	SIZE_INIT(domain, "domain");
 	OFFSET_INIT(domain.domain_id, "domain", "domain_id");
@@ -5257,32 +6587,50 @@ get_structure_info_xen(void)
 }
 
 int
-get_xen_phys_start(void)
+init_xen_crash_info(void)
 {
-	off_t offset, offset_xen_crash_info;
-	unsigned long xen_phys_start, size_xen_crash_info;
-	const off_t failed = (off_t)-1;
-
-	if (info->xen_phys_start)
-		return TRUE;
+	off_t		offset_xen_crash_info;
+	unsigned long	size_xen_crash_info;
+	void		*buf;
 
 	get_xen_crash_info(&offset_xen_crash_info, &size_xen_crash_info);
-	if (size_xen_crash_info >= SIZE_XEN_CRASH_INFO_V2) {
-		offset = offset_xen_crash_info + size_xen_crash_info
-			 - sizeof(unsigned long) * 2;
-		if (lseek(info->fd_memory, offset, SEEK_SET) == failed) {
-			ERRMSG("Can't seek the dump memory(%s). %s\n",
-			    info->name_memory, strerror(errno));
-			return FALSE;
-		}
-		if (read(info->fd_memory, &xen_phys_start, sizeof(unsigned long))
-		    != sizeof(unsigned long)) {
-			ERRMSG("Can't read the dump memory(%s). %s\n",
-			    info->name_memory, strerror(errno));
-			return FALSE;
-		}
-		info->xen_phys_start = xen_phys_start;
+	if (!size_xen_crash_info) {
+		info->xen_crash_info_v = -1;
+		return TRUE;		/* missing info is non-fatal */
 	}
+
+	if (size_xen_crash_info < sizeof(xen_crash_info_com_t)) {
+		ERRMSG("Xen crash info too small (%lu bytes).\n",
+		       size_xen_crash_info);
+		return FALSE;
+	}
+
+	buf = malloc(size_xen_crash_info);
+	if (!buf) {
+		ERRMSG("Can't allocate note (%lu bytes). %s\n",
+		       size_xen_crash_info, strerror(errno));
+		return FALSE;
+	}
+
+	if (lseek(info->fd_memory, offset_xen_crash_info, SEEK_SET) < 0) {
+		ERRMSG("Can't seek the dump memory(%s). %s\n",
+		       info->name_memory, strerror(errno));
+		return FALSE;
+	}
+	if (read(info->fd_memory, buf, size_xen_crash_info)
+	    != size_xen_crash_info) {
+		ERRMSG("Can't read the dump memory(%s). %s\n",
+		       info->name_memory, strerror(errno));
+		return FALSE;
+	}
+
+	info->xen_crash_info.com = buf;
+	if (size_xen_crash_info >= sizeof(xen_crash_info_v2_t))
+		info->xen_crash_info_v = 2;
+	else if (size_xen_crash_info >= sizeof(xen_crash_info_t))
+		info->xen_crash_info_v = 1;
+	else
+		info->xen_crash_info_v = 0;
 
 	return TRUE;
 }
@@ -5294,23 +6642,32 @@ get_xen_info(void)
 	unsigned int domain_id;
 	int num_domain;
 
-	if (SYMBOL(alloc_bitmap) == NOT_FOUND_SYMBOL) {
-		ERRMSG("Can't get the symbol of alloc_bitmap.\n");
+	/*
+	 * Get architecture specific basic data
+	 */
+	if (!get_xen_basic_info_arch())
 		return FALSE;
-	}
-	if (!readmem(VADDR_XEN, SYMBOL(alloc_bitmap), &info->alloc_bitmap,
-	      sizeof(info->alloc_bitmap))) {
-		ERRMSG("Can't get the value of alloc_bitmap.\n");
-		return FALSE;
-	}
-	if (SYMBOL(max_page) == NOT_FOUND_SYMBOL) {
-		ERRMSG("Can't get the symbol of max_page.\n");
-		return FALSE;
-	}
-	if (!readmem(VADDR_XEN, SYMBOL(max_page), &info->max_page,
-	    sizeof(info->max_page))) {
-		ERRMSG("Can't get the value of max_page.\n");
-		return FALSE;
+
+	if (!info->xen_crash_info.com ||
+	    info->xen_crash_info.com->xen_major_version < 4) {
+		if (SYMBOL(alloc_bitmap) == NOT_FOUND_SYMBOL) {
+			ERRMSG("Can't get the symbol of alloc_bitmap.\n");
+			return FALSE;
+		}
+		if (!readmem(VADDR_XEN, SYMBOL(alloc_bitmap), &info->alloc_bitmap,
+		      sizeof(info->alloc_bitmap))) {
+			ERRMSG("Can't get the value of alloc_bitmap.\n");
+			return FALSE;
+		}
+		if (SYMBOL(max_page) == NOT_FOUND_SYMBOL) {
+			ERRMSG("Can't get the symbol of max_page.\n");
+			return FALSE;
+		}
+		if (!readmem(VADDR_XEN, SYMBOL(max_page), &info->max_page,
+		    sizeof(info->max_page))) {
+			ERRMSG("Can't get the value of max_page.\n");
+			return FALSE;
+		}
 	}
 
 	/*
@@ -5447,6 +6804,12 @@ show_data_xen(void)
 	MSG("OFFSET(domain.next_in_list): %ld\n", OFFSET(domain.next_in_list));
 
 	MSG("\n");
+	if (info->xen_crash_info.com) {
+		MSG("xen_major_version: %lx\n",
+		    info->xen_crash_info.com->xen_major_version);
+		MSG("xen_minor_version: %lx\n",
+		    info->xen_crash_info.com->xen_minor_version);
+	}
 	MSG("xen_phys_start: %lx\n", info->xen_phys_start);
 	MSG("frame_table_vaddr: %lx\n", info->frame_table_vaddr);
 	MSG("xen_heap_start: %lx\n", info->xen_heap_start);
@@ -5630,7 +6993,7 @@ is_select_domain(unsigned int id)
 }
 
 int
-exclude_xen_user_domain(void)
+exclude_xen3_user_domain(void)
 {
 	int i;
 	unsigned int count_info, _domain;
@@ -5639,9 +7002,6 @@ exclude_xen_user_domain(void)
 	unsigned long long phys_start, phys_end;
 	unsigned long long pfn, pfn_end;
 	unsigned long long j, size;
-	struct timeval tv_start;
-
-	gettimeofday(&tv_start, NULL);
 
 	/*
 	 * NOTE: the first half of bitmap is not used for Xen extraction
@@ -5692,13 +7052,106 @@ exclude_xen_user_domain(void)
 		}
 	}
 
+	return TRUE;
+}
+
+int
+exclude_xen4_user_domain(void)
+{
+	int i;
+	unsigned long count_info;
+	unsigned int  _domain;
+	unsigned int num_pt_loads = get_num_pt_loads();
+	unsigned long page_info_addr;
+	unsigned long long phys_start, phys_end;
+	unsigned long long pfn, pfn_end;
+	unsigned long long j, size;
+
+	/*
+	 * NOTE: the first half of bitmap is not used for Xen extraction
+	 */
+	for (i = 0; get_pt_load(i, &phys_start, &phys_end, NULL, NULL); i++) {
+
+		print_progress(PROGRESS_XEN_DOMAIN, i, num_pt_loads);
+
+		pfn     = paddr_to_pfn(phys_start);
+		pfn_end = paddr_to_pfn(phys_end);
+		size    = pfn_end - pfn;
+
+		for (j = 0; pfn < pfn_end; pfn++, j++) {
+			print_progress(PROGRESS_XEN_DOMAIN, j + (size * i),
+					size * num_pt_loads);
+
+			page_info_addr = info->frame_table_vaddr + pfn * SIZE(page_info);
+			if (!readmem(VADDR_XEN,
+			      page_info_addr + OFFSET(page_info.count_info),
+		 	      &count_info, sizeof(count_info))) {
+				clear_bit_on_2nd_bitmap(pfn);
+				continue;	/* page_info may not exist */
+			}
+
+			/* always keep Xen heap pages */
+			if (count_info & PGC_xen_heap)
+				continue;
+
+			/* delete free, offlined and broken pages */
+			if (page_state_is(count_info, free) ||
+			    page_state_is(count_info, offlined) ||
+			    count_info & PGC_broken) {
+				clear_bit_on_2nd_bitmap(pfn);
+				continue;
+			}
+
+			/* keep inuse pages not allocated to any domain
+			 * this covers e.g. Xen static data
+			 */
+			if (! (count_info & PGC_allocated))
+				continue;
+
+			/* Need to check the domain
+			 * keep:
+			 *  - anonymous (_domain == 0), or
+			 *  - selected domain page
+			 */
+			if (!readmem(VADDR_XEN,
+			      page_info_addr + OFFSET(page_info._domain),
+			      &_domain, sizeof(_domain))) {
+				ERRMSG("Can't get page_info._domain.\n");
+				return FALSE;
+			}
+
+			if (_domain == 0)
+				continue;
+			if (is_select_domain(_domain))
+				continue;
+			clear_bit_on_2nd_bitmap(pfn);
+		}
+	}
+
+	return TRUE;
+}
+
+int
+exclude_xen_user_domain(void)
+{
+	struct timeval tv_start;
+	int ret;
+
+	gettimeofday(&tv_start, NULL);
+
+	if (info->xen_crash_info.com &&
+	    info->xen_crash_info.com->xen_major_version >= 4)
+		ret = exclude_xen4_user_domain();
+	else
+		ret = exclude_xen3_user_domain();
+
 	/*
 	 * print [100 %]
 	 */
-	print_progress(PROGRESS_XEN_DOMAIN, num_pt_loads, num_pt_loads);
+	print_progress(PROGRESS_XEN_DOMAIN, 1, 1);
 	print_execution_time(PROGRESS_XEN_DOMAIN, &tv_start);
 
-	return TRUE;
+	return ret;
 }
 
 int
@@ -5726,6 +7179,8 @@ initial_xen(void)
 		return FALSE;
 	}
 #endif
+	if (!init_xen_crash_info())
+		return FALSE;
 	if (!fallback_to_current_page_size())
 		return FALSE;
 	/*
@@ -5772,8 +7227,6 @@ initial_xen(void)
 		if (!read_vmcoreinfo_from_vmcore(offset, size, TRUE))
 			return FALSE;
 	}
-	if (!get_xen_phys_start())
-		return FALSE;
 	if (!get_xen_info())
 		return FALSE;
 
@@ -5820,7 +7273,7 @@ print_report(void)
 	pfn_original = info->max_mapnr - pfn_memhole;
 
 	pfn_excluded = pfn_zero + pfn_cache + pfn_cache_private
-	    + pfn_user + pfn_free;
+	    + pfn_user + pfn_free + pfn_hwpoison;
 	shrinking = (pfn_original - pfn_excluded) * 100;
 	shrinking = shrinking / pfn_original;
 
@@ -5833,6 +7286,7 @@ print_report(void)
 	    pfn_cache_private);
 	REPORT_MSG("    User process data pages : 0x%016llx\n", pfn_user);
 	REPORT_MSG("    Free pages              : 0x%016llx\n", pfn_free);
+	REPORT_MSG("    Hwpoison pages          : 0x%016llx\n", pfn_hwpoison);
 	REPORT_MSG("  Remaining pages  : 0x%016llx\n",
 	    pfn_original - pfn_excluded);
 	REPORT_MSG("  (The number of pages is reduced to %lld%%.)\n",
@@ -5868,9 +7322,21 @@ writeout_dumpfile(void)
 	if (info->flag_elf_dumpfile) {
 		if (!write_elf_header(&cd_header))
 			goto out;
-		if (!write_elf_pages(&cd_header, &cd_page))
-			goto out;
+		if (info->flag_cyclic) {
+			if (!write_elf_pages_cyclic(&cd_header, &cd_page))
+				goto out;
+		} else {
+			if (!write_elf_pages(&cd_header, &cd_page))
+				goto out;
+		}
 		if (!write_elf_eraseinfo(&cd_header))
+			goto out;
+	} else if (info->flag_cyclic) {
+		if (!write_kdump_header())
+			goto out;
+		if (!write_kdump_pages_and_bitmap_cyclic(&cd_header, &cd_page))
+			goto out;
+		if (!write_kdump_eraseinfo(&cd_page))
 			goto out;
 	} else {
 		if (!write_kdump_header())
@@ -5912,22 +7378,31 @@ setup_splitting(void)
 	if (info->num_dumpfile <= 1)
 		return FALSE;
 
-	initialize_2nd_bitmap(&bitmap2);
-
-	pfn_per_dumpfile = num_dumpable / info->num_dumpfile;
-	start_pfn = end_pfn = 0;
-	for (i = 0; i < info->num_dumpfile; i++) {
-		start_pfn = end_pfn;
-		if (i == (info->num_dumpfile - 1)) {
-			end_pfn  = info->max_mapnr;
-		} else {
-			for (j = 0; j < pfn_per_dumpfile; end_pfn++) {
-				if (is_dumpable(&bitmap2, end_pfn))
-					j++;
-			}
+	if (info->flag_cyclic) {
+		for (i = 0; i < info->num_dumpfile; i++) {
+			SPLITTING_START_PFN(i) = divideup(info->max_mapnr, info->num_dumpfile) * i;
+			SPLITTING_END_PFN(i)   = divideup(info->max_mapnr, info->num_dumpfile) * (i + 1);
 		}
-		SPLITTING_START_PFN(i) = start_pfn;
-		SPLITTING_END_PFN(i)   = end_pfn;
+		if (SPLITTING_END_PFN(i-1) > info->max_mapnr)
+			SPLITTING_END_PFN(i-1) = info->max_mapnr;
+        } else {
+		initialize_2nd_bitmap(&bitmap2);
+
+		pfn_per_dumpfile = num_dumpable / info->num_dumpfile;
+		start_pfn = end_pfn = 0;
+		for (i = 0; i < info->num_dumpfile; i++) {
+			start_pfn = end_pfn;
+			if (i == (info->num_dumpfile - 1)) {
+				end_pfn  = info->max_mapnr;
+			} else {
+				for (j = 0; j < pfn_per_dumpfile; end_pfn++) {
+					if (is_dumpable(&bitmap2, end_pfn))
+						j++;
+				}
+			}
+			SPLITTING_START_PFN(i) = start_pfn;
+			SPLITTING_END_PFN(i)   = end_pfn;
+		}
 	}
 
 	return TRUE;
@@ -6032,10 +7507,6 @@ create_dumpfile(void)
 		if (!get_elf_info(info->fd_memory, info->name_memory))
 			return FALSE;
 	}
-	if (is_xen_memory()) {
-		if (!initial_xen())
-			return FALSE;
-	}
 	if (!initial())
 		return FALSE;
 
@@ -6055,7 +7526,8 @@ retry:
 		}
 	}
 
-	if (info->name_filterconfig && !gather_filter_info())
+	if ((info->name_filterconfig || info->name_eppic_config)
+			&& !gather_filter_info())
 		return FALSE;
 
 	if (!create_dump_bitmap())
@@ -6461,7 +7933,7 @@ reassemble_kdump_pages(void)
 	off_t offset_first_ph, offset_ph_org, offset_eraseinfo;
 	off_t offset_data_new, offset_zero_page = 0;
 	unsigned long long pfn, start_pfn, end_pfn;
-	unsigned long long num_dumpable, num_dumped;
+	unsigned long long num_dumpable;
 	unsigned long size_eraseinfo;
 	struct dump_bitmap bitmap2;
 	struct disk_dump_header dh;
@@ -6877,6 +8349,68 @@ out:
 	return ret;
 }
 
+/*
+ * Get the amount of free memory from /proc/meminfo.
+ */
+unsigned long long
+get_free_memory_size(void) {
+	char buf[BUFSIZE_FGETS];
+	char unit[4];
+	unsigned long long free_size = 0;
+	char *name_meminfo = "/proc/meminfo";
+	FILE *file_meminfo;
+
+	if ((file_meminfo = fopen(name_meminfo, "r")) == NULL) {
+		ERRMSG("Can't open the %s. %s\n", name_meminfo, strerror(errno));
+		return FALSE;
+	}
+
+	while (fgets(buf, BUFSIZE_FGETS, file_meminfo) != NULL) {
+		if (sscanf(buf, "MemFree: %llu %s", &free_size, unit) == 2) {
+			if (strcmp(unit, "kB") == 0) {
+				free_size *= 1024;
+				goto out;
+			}
+		}
+	}
+
+	ERRMSG("Can't get free memory size.\n");
+	free_size = 0;
+out:
+	if (fclose(file_meminfo) < 0)
+		ERRMSG("Can't close the %s. %s\n", name_meminfo, strerror(errno));
+
+	return free_size;
+}
+
+
+/*
+ * Choose the lesser value of the two below as the size of cyclic buffer.
+ *  - the size enough for storing the 1st/2nd bitmap for the whole of vmcore
+ *  - 80% of free memory (as safety limit)
+ */
+int
+calculate_cyclic_buffer_size(void) {
+	unsigned long long free_size, needed_size;
+
+	if (info->max_mapnr <= 0) {
+		ERRMSG("Invalid max_mapnr(%llu).\n", info->max_mapnr);
+		return FALSE;
+	}
+
+	/*
+	 * free_size will be used to allocate 1st and 2nd bitmap, so it
+	 * should be 40% of free memory to keep the size of cyclic buffer
+	 * within 80% of free memory.
+	 */
+	free_size = get_free_memory_size() * 0.4;
+	needed_size = (info->max_mapnr * 2) / BITPERBYTE;
+
+	info->bufsize_cyclic = (free_size <= needed_size) ? free_size : needed_size;
+
+	return TRUE;
+}
+
 static struct option longopts[] = {
 	{"split", no_argument, NULL, 's'}, 
 	{"reassemble", no_argument, NULL, 'r'},
@@ -6889,6 +8423,9 @@ static struct option longopts[] = {
 	{"config", required_argument, NULL, 'C'},
 	{"help", no_argument, NULL, 'h'},
 	{"diskset", required_argument, NULL, 'k'},
+	{"non-cyclic", no_argument, NULL, 'Y'},
+	{"cyclic-buffer", required_argument, NULL, 'Z'},
+	{"eppic", required_argument, NULL, 'S'},
 	{0, 0, 0, 0}
 };
 
@@ -6910,9 +8447,14 @@ main(int argc, char *argv[])
 	}
 	initialize_tables();
 
+	/*
+	 * By default, makedumpfile works in constant memory space.
+	 */
+	info->flag_cyclic = TRUE;
+	
 	info->block_order = DEFAULT_ORDER;
 	message_level = DEFAULT_MSG_LEVEL;
-	while ((opt = getopt_long(argc, argv, "b:cDd:EFfg:hi:MRrsvXx:", longopts,
+	while ((opt = getopt_long(argc, argv, "b:cDd:EFfg:hi:lMpRrsvXx:", longopts,
 	    NULL)) != -1) {
 		switch (opt) {
 		case 'b':
@@ -6922,7 +8464,7 @@ main(int argc, char *argv[])
 			info->name_filterconfig = optarg;
 			break;
 		case 'c':
-			info->flag_compress = 1;
+			info->flag_compress = DUMP_DH_COMPRESSED_ZLIB;
 			break;
 		case 'D':
 			flag_debug = TRUE;
@@ -6961,11 +8503,17 @@ main(int argc, char *argv[])
 				goto out;
 			info->flag_sadump_diskset = 1;
 			break;
+		case 'l':
+			info->flag_compress = DUMP_DH_COMPRESSED_LZO;
+			break;
 		case 'm':
 			message_level = atoi(optarg);
 			break;
 		case 'M':
 			info->flag_dmesg = 1;
+			break;
+		case 'p':
+			info->flag_compress = DUMP_DH_COMPRESSED_SNAPPY;
 			break;
 		case 'P':
 			info->xen_phys_start = strtoul(optarg, NULL, 0);
@@ -6975,6 +8523,9 @@ main(int argc, char *argv[])
 			break;
 		case 's':
 			info->flag_split = 1;
+			break;
+		case 'S':
+			info->name_eppic_config = optarg;
 			break;
 		case 'r':
 			info->flag_reassemble = 1;
@@ -6994,9 +8545,15 @@ main(int argc, char *argv[])
 		case 'y':
 			info->name_xen_syms = optarg;
 			break;
+		case 'Y':
+			info->flag_cyclic = FALSE;
+			break;
 		case 'z':
 			info->flag_read_vmcoreinfo = 1;
 			info->name_vmcoreinfo = optarg;
+			break;
+		case 'Z':
+			info->bufsize_cyclic = atoi(optarg);
 			break;
 		case '?':
 			MSG("Commandline parameter is invalid.\n");
@@ -7140,6 +8697,10 @@ out:
 			free(info->splitting_info);
 		if (info->p2m_mfn_frame_list != NULL)
 			free(info->p2m_mfn_frame_list);
+		if (info->partial_bitmap1 != NULL)
+			free(info->partial_bitmap1);
+		if (info->partial_bitmap2 != NULL)
+			free(info->partial_bitmap2);
 		free(info);
 	}
 	free_elf_info();

@@ -388,6 +388,7 @@ function kdump_save_core()
 	KDUMP_STAMPDIR="$KDUMP_COREDIR/"`date +"%Y%m%d%H%M"`
 	KDUMP_CORETEMP="$KDUMP_STAMPDIR/dump-incomplete"
 	KDUMP_COREFILE="$KDUMP_STAMPDIR/dump."`date +"%Y%m%d%H%M"`
+	KDUMP_DMESGFILE="$KDUMP_STAMPDIR/dmesg."`date +"%Y%m%d%H%M"`
 
 	mkdir -p $KDUMP_STAMPDIR
 
@@ -419,10 +420,27 @@ function kdump_save_core()
 		mv $KDUMP_CORETEMP $KDUMP_COREFILE
 		log_success_msg "$NAME: saved vmcore in $KDUMP_STAMPDIR"
 		logger -t $NAME "saved vmcore in $KDUMP_STAMPDIR"
-		return 0;
 	else
 		log_failure_msg "$NAME: failed to save vmcore in $KDUMP_STAMPDIR"
 		logger -t $NAME "failed to save vmcore in $KDUMP_STAMPDIR"
+	fi
+
+	log_action_msg "running makedumpfile --dump-dmesg $vmcore_file $KDUMP_DMESGFILE"
+	makedumpfile --dump-dmesg $vmcore_file $KDUMP_DMESGFILE
+	ERROR=$?
+	if [ $ERROR -ne 0 ] ; then
+		log_failure_msg "$NAME: makedumpfile --dump-dmesg failed. dmesg content will be unavailable"
+		logger -t $NAME "makedumpfile --dump-dmesg failed. dmesg content will be unavailable"
+	fi
+
+	# did we succeed?
+	if [ $ERROR == 0 ]; then
+		log_success_msg "$NAME: saved dmesg content in $KDUMP_STAMPDIR"
+		logger -t $NAME "saved dmesg content in $KDUMP_STAMPDIR"
+		return 0;
+	else
+		log_failure_msg "$NAME: failed to save dmesg content in $KDUMP_STAMPDIR"
+		logger -t $NAME "failed to save dmesg content in $KDUMP_STAMPDIR"
 		return 1;
 	fi
 }

@@ -37,7 +37,6 @@
 enum {
 	DWARF_INFO_GET_STRUCT_SIZE,
 	DWARF_INFO_GET_MEMBER_OFFSET,
-	DWARF_INFO_GET_MEMBER_OFFSET_IN_UNION,
 	DWARF_INFO_GET_MEMBER_OFFSET_1ST_UNION,
 	DWARF_INFO_GET_MEMBER_ARRAY_LENGTH,
 	DWARF_INFO_GET_SYMBOL_ARRAY_LENGTH,
@@ -47,6 +46,16 @@ enum {
 	DWARF_INFO_CHECK_SYMBOL_ARRAY_TYPE,
 	DWARF_INFO_GET_SYMBOL_TYPE,
 	DWARF_INFO_GET_MEMBER_TYPE,
+	DWARF_INFO_GET_ENUMERATION_TYPE_SIZE,
+	DWARF_INFO_GET_DOMAIN_STRUCT,
+	DWARF_INFO_GET_DOMAIN_TYPEDEF,
+	DWARF_INFO_GET_DOMAIN_ARRAY,
+	DWARF_INFO_GET_DOMAIN_UNION,
+	DWARF_INFO_GET_DOMAIN_ENUM,
+	DWARF_INFO_GET_DOMAIN_REF,
+	DWARF_INFO_GET_DOMAIN_STRING,
+	DWARF_INFO_GET_DOMAIN_BASE,
+	DWARF_INFO_GET_DIE,
 };
 
 char *get_dwarf_module_name(void);
@@ -61,6 +70,15 @@ char *get_member_type_name(char *structname, char *membername, int cmd, long *si
 long get_array_length(char *name01, char *name02, unsigned int cmd);
 long get_enum_number(char *enum_name);
 int get_source_filename(char *structname, char *src_name, int cmd);
+long get_domain(char *symname, int cmd, unsigned long long *die);
+int get_die_nfields(unsigned long long die_off);
+int get_die_member(unsigned long long die_off, int index, long *offset,
+	char **name, int *nbits, int *fbits, unsigned long long *m_die);
+int get_die_attr_type(unsigned long long die_off, int *type_flag,
+	unsigned long long *die_attr_off);
+char *get_die_name(unsigned long long die_off);
+unsigned long long get_die_offset(char *sysname);
+int get_die_length(unsigned long long die_off, int flag);
 int set_dwarf_debuginfo(char *mod_name, char *os_release, char *name_debuginfo, int fd_debuginfo);
 
 #endif  /* DWARF_INFO_H */

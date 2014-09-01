@@ -1,3 +1,34 @@
+makedumpfile (1.5.3-1) unstable; urgency=low
+
+  [ Louis Bouchard ]
+  * New upstream version
+    - Drop 0003-PATCH-dump-dmesg-fix-for-post-3.5-kernels.patch
+      (included upstream)
+    - Rebase 0002-Use-install-instead-of-cp-in-Makefile.patch
+
+ -- John Wright <jsw@debian.org>  Sun, 31 Mar 2013 20:45:37 -0700
+
+makedumpfile (1.5.1-1) unstable; urgency=low
+
+  * Merge of new upstream version 1.5.1
+  * Add --dmesg-fix from upstream 1.5.2 for kernels 3.5
+    and above
+  * Add creation of /var/crash/dmesg.{timestamp} by kdump-config
+
+ -- Louis Bouchard <louis.bouchard@canonical.com>  Tue, 05 Feb 2013 09:55:43 +0100
+
+makedumpfile (1.5.0-1) unstable; urgency=low
+
+  * New upstream version 1.5.0
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Mon, 17 Sep 2012 15:55:39 +0200
+
+makedumpfile (1.4.4-1) unstable; urgency=low
+
+  * New upstream version
+
+ -- John Wright <jsw@debian.org>  Mon, 16 Jul 2012 04:01:21 -0600
+
 makedumpfile (1.4.3-1) unstable; urgency=low
 
   [ Louis Bouchard ]

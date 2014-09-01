@@ -12,14 +12,12 @@ page, so that dh_compress can compress it according to policy.
  Makefile |   20 +++++++-------------
  1 file changed, 7 insertions(+), 13 deletions(-)
 
-diff --git a/Makefile b/Makefile
-index 3001792..1ca8608 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -60,21 +60,15 @@ $(OBJ_ARCH): $(SRC_ARCH)
+@@ -70,14 +70,6 @@
  
  makedumpfile: $(SRC) $(OBJ_PART) $(OBJ_ARCH)
- 	$(CC) $(CFLAGS) $(LDFLAGS) $(OBJ_PART) $(OBJ_ARCH) -o $@ $< $(LIBS)
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $(OBJ_PART) $(OBJ_ARCH) -rdynamic -o $@ $< $(LIBS)
 -	echo .TH MAKEDUMPFILE 8 \"$(DATE)\" \"makedumpfile v$(VERSION)\" \"Linux System Administrator\'s Manual\" > temp.8
 -	grep -v "^.TH MAKEDUMPFILE 8" makedumpfile.8 >> temp.8
 -	mv temp.8 makedumpfile.8
@@ -29,7 +27,9 @@ index 3001792..1ca8608 100644
 -	mv temp.5 makedumpfile.conf.5
 -	gzip -c ./makedumpfile.conf.5 > ./makedumpfile.conf.5.gz
  
- clean:
+ eppic_makedumpfile.so: extension_eppic.c
+ 	$(CC) $(CFLAGS) -shared -rdynamic -o $@ extension_eppic.c -fPIC -leppic -ltinfo
+@@ -86,8 +78,10 @@
  	rm -f $(OBJ) $(OBJ_PART) $(OBJ_ARCH) makedumpfile makedumpfile.8.gz makedumpfile.conf.5.gz
  
  install:
@@ -45,6 +45,3 @@ index 3001792..1ca8608 100644
 +	install -D -m644 makedumpfile.conf.5 \
 +		${DESTDIR}/usr/share/man/man5/makedumpfile.conf.5
 +	install -D -m644 makedumpfile.conf ${DESTDIR}/etc/makedumpfile.conf
--- 
-1.7.9.5
-
