@@ -1,0 +1,471 @@
+Description: Adapt to kernel 3.16 changes in symbols
+ This version uses struct vmlist which is no longer available
+ in kernel 3.16. This patch backports the changes made to newer
+ versions to adapt to this change.
+ Backported commits are : 759b78c, cee64e3, 8145e41, e203095, 
+ 150b58eb, 846ab2e, 1202589, 8a0236c, 9d38132, e24dc53
+Author: Louis Bouchard <louis.bouchard@ubuntu.com>
+Bug: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=719943
+Index: makedumpfile-1.5.3/arch/ppc64.c
+===================================================================
+--- makedumpfile-1.5.3.orig/arch/ppc64.c
++++ makedumpfile-1.5.3/arch/ppc64.c
+@@ -49,7 +49,7 @@ set_ppc64_max_physmem_bits(void)
+ int
+ get_machdep_info_ppc64(void)
+ {
+-	unsigned long vmlist, vmalloc_start;
++	unsigned long vmlist, vmap_area_list, vmalloc_start;
+ 
+ 	info->section_size_bits = _SECTION_SIZE_BITS;
+ 	if (!set_ppc64_max_physmem_bits()) {
+@@ -66,22 +66,40 @@ get_machdep_info_ppc64(void)
+ 	DEBUG_MSG("kernel_start : %lx\n", info->kernel_start);
+ 
+ 	/*
+-	 * For the compatibility, makedumpfile should run without the symbol
+-	 * vmlist and the offset of vm_struct.addr if they are not necessary.
++	 * Get vmalloc_start value from either vmap_area_list or vmlist.
+ 	 */
+-	if ((SYMBOL(vmlist) == NOT_FOUND_SYMBOL)
+-	    || (OFFSET(vm_struct.addr) == NOT_FOUND_STRUCTURE)) {
++	if ((SYMBOL(vmap_area_list) != NOT_FOUND_SYMBOL)
++	    && (OFFSET(vmap_area.va_start) != NOT_FOUND_STRUCTURE)
++	    && (OFFSET(vmap_area.list) != NOT_FOUND_STRUCTURE)) {
++		if (!readmem(VADDR, SYMBOL(vmap_area_list) + OFFSET(list_head.next),
++			     &vmap_area_list, sizeof(vmap_area_list))) {
++			ERRMSG("Can't get vmap_area_list.\n");
++			return FALSE;
++		}
++		if (!readmem(VADDR, vmap_area_list - OFFSET(vmap_area.list) +
++			     OFFSET(vmap_area.va_start), &vmalloc_start,
++			     sizeof(vmalloc_start))) {
++			ERRMSG("Can't get vmalloc_start.\n");
++			return FALSE;
++		}
++	} else if ((SYMBOL(vmlist) != NOT_FOUND_SYMBOL)
++		   && (OFFSET(vm_struct.addr) != NOT_FOUND_STRUCTURE)) {
++		if (!readmem(VADDR, SYMBOL(vmlist), &vmlist, sizeof(vmlist))) {
++			ERRMSG("Can't get vmlist.\n");
++			return FALSE;
++		}
++		if (!readmem(VADDR, vmlist + OFFSET(vm_struct.addr), &vmalloc_start,
++			     sizeof(vmalloc_start))) {
++			ERRMSG("Can't get vmalloc_start.\n");
++			return FALSE;
++		}
++	} else {
++		/*
++		 * For the compatibility, makedumpfile should run without the symbol
++		 * vmlist and the offset of vm_struct.addr if they are not necessary.
++		 */
+ 		return TRUE;
+ 	}
+-	if (!readmem(VADDR, SYMBOL(vmlist), &vmlist, sizeof(vmlist))) {
+-		ERRMSG("Can't get vmlist.\n");
+-		return FALSE;
+-	}
+-	if (!readmem(VADDR, vmlist + OFFSET(vm_struct.addr), &vmalloc_start,
+-	    sizeof(vmalloc_start))) {
+-		ERRMSG("Can't get vmalloc_start.\n");
+-		return FALSE;
+-	}
+ 	info->vmalloc_start = vmalloc_start;
+ 	DEBUG_MSG("vmalloc_start: %lx\n", vmalloc_start);
+ 
+Index: makedumpfile-1.5.3/arch/ppc.c
+===================================================================
+--- makedumpfile-1.5.3.orig/arch/ppc.c
++++ makedumpfile-1.5.3/arch/ppc.c
+@@ -28,7 +28,7 @@
+ int
+ get_machdep_info_ppc(void)
+ {
+-	unsigned long vmlist, vmalloc_start;
++	unsigned long vmlist, vmap_area_list, vmalloc_start;
+ 
+ 	info->section_size_bits = _SECTION_SIZE_BITS;
+ 	info->max_physmem_bits  = _MAX_PHYSMEM_BITS;
+@@ -44,22 +44,40 @@ get_machdep_info_ppc(void)
+ 	DEBUG_MSG("kernel_start : %lx\n", info->kernel_start);
+ 
+ 	/*
+-	 * For the compatibility, makedumpfile should run without the symbol
+-	 * vmlist and the offset of vm_struct.addr if they are not necessary.
++	 * Get vmalloc_start value from either vmap_area_list or vmlist.
+ 	 */
+-	if ((SYMBOL(vmlist) == NOT_FOUND_SYMBOL)
+-	    || (OFFSET(vm_struct.addr) == NOT_FOUND_STRUCTURE)) {
++	if ((SYMBOL(vmap_area_list) != NOT_FOUND_SYMBOL)
++	    && (OFFSET(vmap_area.va_start) != NOT_FOUND_STRUCTURE)
++	    && (OFFSET(vmap_area.list) != NOT_FOUND_STRUCTURE)) {
++		if (!readmem(VADDR, SYMBOL(vmap_area_list) + OFFSET(list_head.next),
++			     &vmap_area_list, sizeof(vmap_area_list))) {
++			ERRMSG("Can't get vmap_area_list.\n");
++			return FALSE;
++		}
++		if (!readmem(VADDR, vmap_area_list - OFFSET(vmap_area.list) +
++			     OFFSET(vmap_area.va_start), &vmalloc_start,
++			     sizeof(vmalloc_start))) {
++			ERRMSG("Can't get vmalloc_start.\n");
++			return FALSE;
++		}
++	} else if ((SYMBOL(vmlist) != NOT_FOUND_SYMBOL)
++		   && (OFFSET(vm_struct.addr) != NOT_FOUND_STRUCTURE)) {
++		if (!readmem(VADDR, SYMBOL(vmlist), &vmlist, sizeof(vmlist))) {
++			ERRMSG("Can't get vmlist.\n");
++			return FALSE;
++		}
++		if (!readmem(VADDR, vmlist + OFFSET(vm_struct.addr), &vmalloc_start,
++			     sizeof(vmalloc_start))) {
++			ERRMSG("Can't get vmalloc_start.\n");
++			return FALSE;
++		}
++	} else {
++		/*
++		 * For the compatibility, makedumpfile should run without the symbol
++		 * vmlist and the offset of vm_struct.addr if they are not necessary.
++		 */
+ 		return TRUE;
+ 	}
+-	if (!readmem(VADDR, SYMBOL(vmlist), &vmlist, sizeof(vmlist))) {
+-		ERRMSG("Can't get vmlist.\n");
+-		return FALSE;
+-	}
+-	if (!readmem(VADDR, vmlist + OFFSET(vm_struct.addr), &vmalloc_start,
+-	    sizeof(vmalloc_start))) {
+-		ERRMSG("Can't get vmalloc_start.\n");
+-		return FALSE;
+-	}
+ 	info->vmalloc_start = vmalloc_start;
+ 	DEBUG_MSG("vmalloc_start: %lx\n", vmalloc_start);
+ 
+Index: makedumpfile-1.5.3/arch/x86.c
+===================================================================
+--- makedumpfile-1.5.3.orig/arch/x86.c
++++ makedumpfile-1.5.3/arch/x86.c
+@@ -70,7 +70,7 @@ remap_init(void)
+ int
+ get_machdep_info_x86(void)
+ {
+-	unsigned long vmlist, vmalloc_start;
++	unsigned long vmlist, vmap_area_list, vmalloc_start;
+ 
+ 	/* PAE */
+ 	if ((vt.mem_flags & MEMORY_X86_PAE)
+@@ -100,22 +100,40 @@ get_machdep_info_x86(void)
+ 		return FALSE;
+ 
+ 	/*
+-	 * For the compatibility, makedumpfile should run without the symbol
+-	 * vmlist and the offset of vm_struct.addr if they are not necessary.
++	 * Get vmalloc_start value from either vmap_area_list or vmlist.
+ 	 */
+-	if ((SYMBOL(vmlist) == NOT_FOUND_SYMBOL)
+-	    || (OFFSET(vm_struct.addr) == NOT_FOUND_STRUCTURE)) {
++	if ((SYMBOL(vmap_area_list) != NOT_FOUND_SYMBOL)
++	    && (OFFSET(vmap_area.va_start) != NOT_FOUND_STRUCTURE)
++	    && (OFFSET(vmap_area.list) != NOT_FOUND_STRUCTURE)) {
++		if (!readmem(VADDR, SYMBOL(vmap_area_list) + OFFSET(list_head.next),
++			     &vmap_area_list, sizeof(vmap_area_list))) {
++			ERRMSG("Can't get vmap_area_list.\n");
++			return FALSE;
++		}
++		if (!readmem(VADDR, vmap_area_list - OFFSET(vmap_area.list) +
++			     OFFSET(vmap_area.va_start), &vmalloc_start,
++			     sizeof(vmalloc_start))) {
++			ERRMSG("Can't get vmalloc_start.\n");
++			return FALSE;
++		}
++	} else if ((SYMBOL(vmlist) != NOT_FOUND_SYMBOL)
++		   && (OFFSET(vm_struct.addr) != NOT_FOUND_STRUCTURE)) {
++		if (!readmem(VADDR, SYMBOL(vmlist), &vmlist, sizeof(vmlist))) {
++			ERRMSG("Can't get vmlist.\n");
++			return FALSE;
++		}
++		if (!readmem(VADDR, vmlist + OFFSET(vm_struct.addr), &vmalloc_start,
++			     sizeof(vmalloc_start))) {
++			ERRMSG("Can't get vmalloc_start.\n");
++			return FALSE;
++		}
++	} else {
++		/*
++		 * For the compatibility, makedumpfile should run without the symbol
++		 * used to get vmalloc_start value if they are not necessary.
++		 */
+ 		return TRUE;
+ 	}
+-	if (!readmem(VADDR, SYMBOL(vmlist), &vmlist, sizeof(vmlist))) {
+-		ERRMSG("Can't get vmlist.\n");
+-		return FALSE;
+-	}
+-	if (!readmem(VADDR, vmlist + OFFSET(vm_struct.addr), &vmalloc_start,
+-	    sizeof(vmalloc_start))) {
+-		ERRMSG("Can't get vmalloc_start.\n");
+-		return FALSE;
+-	}
+ 	info->vmalloc_start = vmalloc_start;
+ 	DEBUG_MSG("vmalloc_start: %lx\n", vmalloc_start);
+ 
+Index: makedumpfile-1.5.3/makedumpfile.c
+===================================================================
+--- makedumpfile-1.5.3.orig/makedumpfile.c
++++ makedumpfile-1.5.3/makedumpfile.c
+@@ -857,6 +857,7 @@ get_symbol_info(void)
+ 	SYMBOL_INIT(swapper_pg_dir, "swapper_pg_dir");
+ 	SYMBOL_INIT(init_level4_pgt, "init_level4_pgt");
+ 	SYMBOL_INIT(vmlist, "vmlist");
++	SYMBOL_INIT(vmap_area_list, "vmap_area_list");
+ 	SYMBOL_INIT(phys_base, "phys_base");
+ 	SYMBOL_INIT(node_online_map, "node_online_map");
+ 	SYMBOL_INIT(node_states, "node_states");
+@@ -992,6 +993,8 @@ get_structure_info(void)
+ 	OFFSET_INIT(node_memblk_s.nid, "node_memblk_s", "nid");
+ 
+ 	OFFSET_INIT(vm_struct.addr, "vm_struct", "addr");
++	OFFSET_INIT(vmap_area.va_start, "vmap_area", "va_start");
++	OFFSET_INIT(vmap_area.list, "vmap_area", "list");
+ 
+ 	/*
+ 	 * Get offset of the module members.
+@@ -1197,10 +1200,23 @@ get_structure_info(void)
+ 	OFFSET_INIT(elf64_phdr.p_paddr, "elf64_phdr", "p_paddr");
+ 	OFFSET_INIT(elf64_phdr.p_memsz, "elf64_phdr", "p_memsz");
+ 
+-	SIZE_INIT(log, "log");
+-	OFFSET_INIT(log.ts_nsec, "log", "ts_nsec");
+-	OFFSET_INIT(log.len, "log", "len");
+-	OFFSET_INIT(log.text_len, "log", "text_len");
++	SIZE_INIT(printk_log, "printk_log");
++	if (SIZE(printk_log) != NOT_FOUND_STRUCTURE) {
++		/*
++		 * In kernel 3.11-rc4 the log structure name was renamed
++		 * to "printk_log".
++		 */
++		info->flag_use_printk_log = TRUE;
++		OFFSET_INIT(printk_log.ts_nsec, "printk_log", "ts_nsec");
++		OFFSET_INIT(printk_log.len, "printk_log", "len");
++		OFFSET_INIT(printk_log.text_len, "printk_log", "text_len");
++	} else {
++		info->flag_use_printk_log = FALSE;
++		SIZE_INIT(printk_log, "log");
++		OFFSET_INIT(printk_log.ts_nsec, "log", "ts_nsec");
++		OFFSET_INIT(printk_log.len, "log", "len");
++		OFFSET_INIT(printk_log.text_len, "log", "text_len");
++	}
+ 
+ 	return TRUE;
+ }
+@@ -1371,6 +1387,7 @@ write_vmcoreinfo_data(void)
+ 	WRITE_SYMBOL("swapper_pg_dir", swapper_pg_dir);
+ 	WRITE_SYMBOL("init_level4_pgt", init_level4_pgt);
+ 	WRITE_SYMBOL("vmlist", vmlist);
++	WRITE_SYMBOL("vmap_area_list", vmap_area_list);
+ 	WRITE_SYMBOL("phys_base", phys_base);
+ 	WRITE_SYMBOL("node_online_map", node_online_map);
+ 	WRITE_SYMBOL("node_states", node_states);
+@@ -1400,7 +1417,10 @@ write_vmcoreinfo_data(void)
+ 	WRITE_STRUCTURE_SIZE("node_memblk_s", node_memblk_s);
+ 	WRITE_STRUCTURE_SIZE("nodemask_t", nodemask_t);
+ 	WRITE_STRUCTURE_SIZE("pageflags", pageflags);
+-	WRITE_STRUCTURE_SIZE("log", log);
++	if (info->flag_use_printk_log)
++		WRITE_STRUCTURE_SIZE("printk_log", printk_log);
++	else
++		WRITE_STRUCTURE_SIZE("log", printk_log);
+ 
+ 	/*
+ 	 * write the member offset of 1st kernel
+@@ -1433,9 +1453,18 @@ write_vmcoreinfo_data(void)
+ 	WRITE_MEMBER_OFFSET("node_memblk_s.size", node_memblk_s.size);
+ 	WRITE_MEMBER_OFFSET("node_memblk_s.nid", node_memblk_s.nid);
+ 	WRITE_MEMBER_OFFSET("vm_struct.addr", vm_struct.addr);
+-	WRITE_MEMBER_OFFSET("log.ts_nsec", log.ts_nsec);
+-	WRITE_MEMBER_OFFSET("log.len", log.len);
+-	WRITE_MEMBER_OFFSET("log.text_len", log.text_len);
++	WRITE_MEMBER_OFFSET("vmap_area.va_start", vmap_area.va_start);
++	WRITE_MEMBER_OFFSET("vmap_area.list", vmap_area.list);
++	if (info->flag_use_printk_log) {
++		WRITE_MEMBER_OFFSET("printk_log.ts_nsec", printk_log.ts_nsec);
++		WRITE_MEMBER_OFFSET("printk_log.len", printk_log.len);
++		WRITE_MEMBER_OFFSET("printk_log.text_len", printk_log.text_len);
++	} else {
++		/* Compatibility with pre-3.11-rc4 */
++		WRITE_MEMBER_OFFSET("log.ts_nsec", printk_log.ts_nsec);
++		WRITE_MEMBER_OFFSET("log.len", printk_log.len);
++		WRITE_MEMBER_OFFSET("log.text_len", printk_log.text_len);
++	}
+ 
+ 	if (SYMBOL(node_data) != NOT_FOUND_SYMBOL)
+ 		WRITE_ARRAY_LENGTH("node_data", node_data);
+@@ -1687,6 +1716,7 @@ read_vmcoreinfo(void)
+ 	READ_SYMBOL("swapper_pg_dir", swapper_pg_dir);
+ 	READ_SYMBOL("init_level4_pgt", init_level4_pgt);
+ 	READ_SYMBOL("vmlist", vmlist);
++	READ_SYMBOL("vmap_area_list", vmap_area_list);
+ 	READ_SYMBOL("phys_base", phys_base);
+ 	READ_SYMBOL("node_online_map", node_online_map);
+ 	READ_SYMBOL("node_states", node_states);
+@@ -1713,7 +1743,6 @@ read_vmcoreinfo(void)
+ 	READ_STRUCTURE_SIZE("node_memblk_s", node_memblk_s);
+ 	READ_STRUCTURE_SIZE("nodemask_t", nodemask_t);
+ 	READ_STRUCTURE_SIZE("pageflags", pageflags);
+-	READ_STRUCTURE_SIZE("log", log);
+ 
+ 	READ_MEMBER_OFFSET("page.flags", page.flags);
+ 	READ_MEMBER_OFFSET("page._count", page._count);
+@@ -1742,9 +1771,22 @@ read_vmcoreinfo(void)
+ 	READ_MEMBER_OFFSET("node_memblk_s.size", node_memblk_s.size);
+ 	READ_MEMBER_OFFSET("node_memblk_s.nid", node_memblk_s.nid);
+ 	READ_MEMBER_OFFSET("vm_struct.addr", vm_struct.addr);
+-	READ_MEMBER_OFFSET("log.ts_nsec", log.ts_nsec);
+-	READ_MEMBER_OFFSET("log.len", log.len);
+-	READ_MEMBER_OFFSET("log.text_len", log.text_len);
++	READ_MEMBER_OFFSET("vmap_area.va_start", vmap_area.va_start);
++	READ_MEMBER_OFFSET("vmap_area.list", vmap_area.list);
++
++	READ_STRUCTURE_SIZE("printk_log", printk_log);
++	if (SIZE(printk_log) != NOT_FOUND_STRUCTURE) {
++		info->flag_use_printk_log = TRUE;
++		READ_MEMBER_OFFSET("printk_log.ts_nsec", printk_log.ts_nsec);
++		READ_MEMBER_OFFSET("printk_log.len", printk_log.len);
++		READ_MEMBER_OFFSET("printk_log.text_len", printk_log.text_len);
++	} else {
++		info->flag_use_printk_log = FALSE;
++		READ_STRUCTURE_SIZE("log", printk_log);
++		READ_MEMBER_OFFSET("log.ts_nsec", printk_log.ts_nsec);
++		READ_MEMBER_OFFSET("log.len", printk_log.len);
++		READ_MEMBER_OFFSET("log.text_len", printk_log.text_len);
++	}
+ 
+ 	READ_ARRAY_LENGTH("node_data", node_data);
+ 	READ_ARRAY_LENGTH("pgdat_list", pgdat_list);
+@@ -3496,13 +3538,13 @@ dump_log_entry(char *logptr, int fp)
+ 	ulonglong nanos;
+ 	ulong rem;
+ 
+-	text_len = USHORT(logptr + OFFSET(log.text_len));
+-	ts_nsec = ULONGLONG(logptr + OFFSET(log.ts_nsec));
++	text_len = USHORT(logptr + OFFSET(printk_log.text_len));
++	ts_nsec = ULONGLONG(logptr + OFFSET(printk_log.ts_nsec));
+ 
+ 	nanos = (ulonglong)ts_nsec / (ulonglong)1000000000;
+ 	rem = (ulonglong)ts_nsec % (ulonglong)1000000000;
+ 
+-	msg = logptr + SIZE(log);
++	msg = logptr + SIZE(printk_log);
+ 
+ 	sprintf(buf, "[%5lld.%06ld] ", nanos, rem/1000);
+ 
+@@ -3540,7 +3582,7 @@ log_from_idx(unsigned int idx, char *log
+ 	 * the buffer.
+ 	 */
+ 
+-	msglen = USHORT(logptr + OFFSET(log.len));
++	msglen = USHORT(logptr + OFFSET(printk_log.len));
+ 	if (!msglen)
+ 		logptr = logbuf;
+ 
+@@ -3561,9 +3603,9 @@ log_next(unsigned int idx, char *logbuf)
+ 	 * return the one after that.
+ 	 */
+ 
+-	msglen = USHORT(logptr + OFFSET(log.len));
++	msglen = USHORT(logptr + OFFSET(printk_log.len));
+ 	if (!msglen) {
+-		msglen = USHORT(logbuf + OFFSET(log.len));
++		msglen = USHORT(logbuf + OFFSET(printk_log.len));
+ 		return msglen;
+ 	}
+ 
+Index: makedumpfile-1.5.3/makedumpfile.h
+===================================================================
+--- makedumpfile-1.5.3.orig/makedumpfile.h
++++ makedumpfile-1.5.3/makedumpfile.h
+@@ -425,7 +425,7 @@ do { \
+ #define KVER_MIN_SHIFT 16
+ #define KERNEL_VERSION(x,y,z) (((x) << KVER_MAJ_SHIFT) | ((y) << KVER_MIN_SHIFT) | (z))
+ #define OLDEST_VERSION		KERNEL_VERSION(2, 6, 15)/* linux-2.6.15 */
+-#define LATEST_VERSION		KERNEL_VERSION(3, 6, 7)/* linux-3.6.7 */
++#define LATEST_VERSION		KERNEL_VERSION(3, 16, 1)/* linux-3.16.1 */
+ 
+ /*
+  * vmcoreinfo in /proc/vmcore
+@@ -890,6 +890,7 @@ struct DumpInfo {
+ 	int		flag_force;	     /* overwrite existing stuff */
+ 	int		flag_exclude_xen_dom;/* exclude Domain-U from xen-kdump */
+ 	int             flag_dmesg;          /* dump the dmesg log out of the vmcore file */
++	int		flag_use_printk_log; /* did we read printk_log symbol name? */
+ 	int		flag_nospace;	     /* the flag of "No space on device" error */
+ 	unsigned long	vaddr_for_vtop;      /* virtual address for debugging */
+ 	long		page_size;           /* size of page */
+@@ -1095,6 +1096,7 @@ struct symbol_table {
+ 	unsigned long long	swapper_pg_dir;
+ 	unsigned long long	init_level4_pgt;
+ 	unsigned long long	vmlist;
++	unsigned long long	vmap_area_list;
+ 	unsigned long long	phys_base;
+ 	unsigned long long	node_online_map;
+ 	unsigned long long	node_states;
+@@ -1164,6 +1166,7 @@ struct size_table {
+ 	long	list_head;
+ 	long	node_memblk_s;
+ 	long	nodemask_t;
++	long	printk_log;
+ 
+ 	/*
+ 	 * for Xen extraction
+@@ -1186,7 +1189,6 @@ struct size_table {
+ 	long	cpumask_t;
+ 	long	kexec_segment;
+ 	long	elf64_hdr;
+-	long	log;
+ 
+ 	long	pageflags;
+ };
+@@ -1232,6 +1234,10 @@ struct offset_table {
+ 	struct vm_struct {
+ 		long	addr;
+ 	} vm_struct;
++	struct vmap_area {
++		long	va_start;
++		long	list;
++	} vmap_area;
+ 
+ 	/*
+ 	 * for Xen extraction
+@@ -1321,11 +1327,11 @@ struct offset_table {
+ 		long	p_memsz;
+ 	} elf64_phdr;
+ 
+-	struct log_s {
++	struct printk_log_s {
+ 		long ts_nsec;
+ 		long len;
+ 		long text_len;
+-	} log;
++	} printk_log;
+ 
+ };
+ 
+Index: makedumpfile-1.5.3/README
+===================================================================
+--- makedumpfile-1.5.3.orig/README
++++ makedumpfile-1.5.3/README
+@@ -94,6 +94,16 @@
+   3.4    | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+   3.5    | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+   3.6    | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.7    | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.8    | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.9    | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.10   | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.11   | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.12   | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.13   | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.14   | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.15   | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  3.16   | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+ 
+   OK    : Support.
+   --    : Not support.

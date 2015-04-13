@@ -1,3 +1,17 @@
+makedumpfile (1:1.5.3-2) unstable; urgency=medium
+
+  * Adapt to kernel 3.16 changes in symbols :
+    - Work around removal of struct vmlist in kernel 3.16
+    - Fix dump_dmesg accordingly
+    - Backported commits are : 759b78c, cee64e3, 8145e41, e203095,
+      150b58eb, 846ab2e, 1202589, 8a0236c, 9d38132, e24dc53
+    Closes: #719943
+  * Implement systemd service and correct mechanism
+    to capture kernel dumps under systemd control
+    Closes: #771210
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Mon, 02 Dec 2014 15:17:43 +0100
+
 makedumpfile (1.5.3-1) unstable; urgency=low
 
   [ Louis Bouchard ]

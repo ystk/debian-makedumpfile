@@ -1,2 +1,3 @@
 0001-Remove-libebl-linkage.patch
 0002-Use-install-instead-of-cp-in-Makefile.patch
+0003-Adapt-to-kernel-3-16.patch

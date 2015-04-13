@@ -64,7 +64,7 @@ KDUMP_COREDIR="/var/crash"
 #     for the kdump kernel.  If unset, it defaults to "irqpoll maxcpus=1 nousb"
 #KDUMP_KEXEC_ARGS=""
 #KDUMP_CMDLINE=""
-#KDUMP_CMDLINE_APPEND="irqpoll maxcpus=1 nousb"
+#KDUMP_CMDLINE_APPEND="irqpoll maxcpus=1 nousb systemd.unit=kdump-tools.service"
 
 # ---------------------------------------------------------------------------
 # Architecture specific Overrides:
