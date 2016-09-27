@@ -1,0 +1,42 @@
+From 1c01d4bfb383c10a97e256f4a6cbf1d92ed133f6 Mon Sep 17 00:00:00 2001
+From: Atsushi Kumagai <ats-kumagai@wm.jp.nec.com>
+Date: Tue, 24 Nov 2015 10:50:07 +0900
+Subject: [PATCH 1/1] [PATCH] Support newer kernels.
+
+A new makedumpfile supports newer kernels:
+
+      - 4.2    (x86 FLATMEM)
+      - 4.2    (x86 SPARSEMEM)
+      - 4.2    (x86_64 SPARSEMEM)
+
+Signed-off-by: Atsushi Kumagai <ats-kumagai@wm.jp.nec.com>
+---
+ README         | 1 +
+ makedumpfile.h | 2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+Index: makedumpfile-1.5.9/README
+===================================================================
+--- makedumpfile-1.5.9.orig/README	2015-11-24 13:14:14.991276206 +0100
++++ makedumpfile-1.5.9/README	2015-11-24 13:14:14.987276206 +0100
+@@ -109,6 +109,7 @@
+   3.19   | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+   4.0    | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+   4.1    | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
++  4.2    | OK | ** |    |    |    | ** |    | -- | OK | OK |    |    |
+ 
+   OK    : Support.
+   --    : Not support.
+Index: makedumpfile-1.5.9/makedumpfile.h
+===================================================================
+--- makedumpfile-1.5.9.orig/makedumpfile.h	2015-11-24 13:14:14.991276206 +0100
++++ makedumpfile-1.5.9/makedumpfile.h	2015-11-24 13:14:14.987276206 +0100
+@@ -456,7 +456,7 @@
+ #define KVER_MIN_SHIFT 16
+ #define KERNEL_VERSION(x,y,z) (((x) << KVER_MAJ_SHIFT) | ((y) << KVER_MIN_SHIFT) | (z))
+ #define OLDEST_VERSION		KERNEL_VERSION(2, 6, 15)/* linux-2.6.15 */
+-#define LATEST_VERSION		KERNEL_VERSION(4, 1, 0)/* linux-4.1.0 */
++#define LATEST_VERSION		KERNEL_VERSION(4, 2, 1)/* linux-4.2.1 */
+ 
+ /*
+  * vmcoreinfo in /proc/vmcore

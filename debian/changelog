@@ -1,0 +1,539 @@
+makedumpfile (1:1.5.9-3~bpo8+1) jessie-backports; urgency=low
+
+  * Rebuild for jessie-backports.
+
+ -- Sandro Tosi <morph@debian.org>  Wed, 03 Feb 2016 06:41:20 -0500
+
+makedumpfile (1:1.5.9-3) sid; urgency=medium
+
+  * debian/patches/0003-support-kernel-4.2.patch :
+    Fix packaging AGAIN so the patch is correctly applied.
+    Previous upload missed it somehow.
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Wed, 09 Dec 2015 15:53:54 +0100
+
+makedumpfile (1:1.5.9-2) sid; urgency=medium
+
+  * debian/patches/0003-support-kernel-4.2.patch :
+    Fix packaging error so the patch is correctly applied
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Mon, 07 Dec 2015 15:58:42 +0100
+
+makedumpfile (1:1.5.9-1) sid; urgency=medium
+
+  * New upstream version includes :
+    o Parallel compression
+     - Add the new option "--num-threads" to enable parallel compression
+       for faster processing. This option intends parallel compression
+       while --split intends parallel i/o, they try to solve different
+       bottlenecks.
+
+    o Change the way to choose the non-cyclic mode
+     - Add the new option "--work-dir" to specify the directory used to
+       store the bitmap. This is the alternative to the combination of
+       --non-cyclic and TMPDIR.
+
+    o Support new kernels
+     - The supported kernel is updated to 4.2 in this version.
+
+    Changelog:
+    o New feature
+        - [PATCH] Support ARM64. (by Pratyush Anand) 94d47d1
+        - [PATCH 1/2] Enable compressed dump formats for Xen. (by Petr Tesarik) 349a0ed
+        - [PATCH 2/2] Remove notes about ELF being the only available format for Xen dumps.
+          (by Petr Tesarik) 5cab480
+        - [PATCH v5 01/10] Add readpage_kdump_compressed_parallel. (by Qiao Nuohan) 5fab021
+        - [PATCH v5 02/10] Add mappage_elf_parallel. (by Qiao Nuohan) edca232
+        - [PATCH v5 03/10] Add readpage_elf_parallel. (by Qiao Nuohan) 7f15b41
+        - [PATCH v5 04/10] Add read_pfn_parallel. (by Qiao Nuohan) a7243fe
+        - [PATCH v5 05/10] Add function to initial bitmap for parallel use. (by Qiao Nuohan) 56a6bc4
+        - [PATCH v5 06/10] Add filter_data_buffer_parallel. (by Qiao Nuohan) 2a7cb9f
+        - [PATCH v5 07/10] Add write_kdump_pages_parallel to allow parallel process. (by Qiao Nuohan) c2595d9
+        - [PATCH v5 08/10] Initial and free data used for parallel process. (by Qiao Nuohan) 4538848
+        - [PATCH v5 09/10] Make makedumpfile available to read and compress pages parallelly.
+          (by Qiao Nuohan) b265102
+        - [PATCH v5 10/10] Add usage and manual about multiple threads process. (by Qiao Nuohan) b18a8a6
+
+    o Bugfix
+        - [PATCH] Correct vmap_area_list support for i386 and ppc32. (by Atsushi Kumagai) 4194d7b
+        - [PATCH] Free pages aren't removed in non-cyclic mode. (by Atsushi Kumagai) d64cf7f
+        - [PATCH v2] Fix a bug in generating incomplete kdump core. (by Zhou Wenjian) 9cee495
+        - [PATCH] Remove the double free of sph. (by Chao Fan) 72dec41
+        - [PATCH 1/2] sadump: Change bit order. (by HATAYAMA Daisuke) 5f15256
+        - [PATCH 2/2] sadump: Perform explicit zero page filtering. (by HATAYAMA Daisuke) 19b3a91
+
+    o Cleanup
+        - [PATCH 01/13] Organize bitmap structure for cyclic logic. (by Atsushi Kumagai) 5fc24bf
+        - [PATCH 02/13] Add option to specify working directory for the bitmap. (by Atsushi Kumagai) 5c5a8b8
+        - [PATCH 03/13] Integrate the entry point of is_dumpable(). (by Atsushi Kumagai) 5c8c680
+        - [PATCH 04/13] Integrate the main logic of writing kdump file. (by Atsushi Kumagai) d18796d
+        - [PATCH 05/13] Communalize the function for creating 1st bitmap. (by Atsushi Kumagai) b00a7b0
+        - [PATCH 06/13] Remove the old logic of writing kdump pages. (by Atsushi Kumagai) 4d55542
+        - [PATCH 07/13] Integrate filtering process for ELF path. (by Atsushi Kumagai) 679a818
+        - [PATCH 08/13] Remove the old logic of writing ELF pages. (by Atsushi Kumagai) 672354b
+        - [PATCH 09/13] Adjust --mem-usage path to the new code. (by Atsushi Kumagai) 57153b0
+        - [PATCH 10/13] Adjust --split/--reassemble path to the new code. (by Atsushi Kumagai) 95435de
+        - [PATCH 11/13] Adjust refiltering path to the new code. (by Atsushi Kumagai) c7fb41c
+        - [PATCH 12/13] Adjust sadump path to the new code. (by Atsushi Kumagai) edd2bf2
+        - [PATCH 13/13] Remove --non-cyclic option. (by Atsushi Kumagai) a117ae9
+        - [PATCH] Optimise the function reserve_diskspace. (by Zhou Wenjian) 3605073
+        - [PATCH v2] Add description of pages lost by ENOSPACE in IMPLEMENTATION. (by Zhou Wenjian) 0e20f33
+        - [PATCH 1/2] Enable compressed dump formats for Xen. (by Petr Tesarik) 349a0ed
+        - [PATCH 2/2] Remove notes about ELF being the only available format for Xen dumps.
+          (by Petr Tesarik) 5cab480
+        - [PATCH v2] Code changes to satisfy the coverity scan. (by Chao Fan) 0c65e38
+        - [PATCH] Improve performance for parallel compression with zlib. (by Atsushi Kumagai) 3ef6629
+
+  * Debian specific enhancements :
+
+    - kdump-tools now make use of smaller initrd.img files created in
+    /var/lib/kdump. This avoid optential OOM when the size of the initrd.img
+    becomes larger (LP: #1496317).  Implementation details are :
+
+      o New kernel hooks are added to create smaller initrd.img files when new
+        kernel packages are installed :
+          /etc/kernel/postrm.d/kdump-tools
+          /etc/kernel/postinst.d/kdump-tools
+
+      o kdump-config is responsible for the maintenance of symbolic links used
+        to point to the appropriate vmlinuz & initrd files. Link maintenance
+        is done at each boot by kdump-config. New links will point to the
+        files named after the running kernel.
+
+      o The KDUMP_KERNEL and KDUMP_INITRD configuration variables are now
+        now enabled and use the symbolic links :
+          /var/lib/kdump/vmlinuz
+          /var/lib/kdump/initrd.img
+
+      o kdump-config has been adapted to show the symbolic link information
+
+    - kdump-tools is now enabled by default.  When installed a prompt will
+      propose to override the default value.
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Tue, 24 Nov 2015 12:38:06 +0100
+
+makedumpfile (1:1.5.8-4) sid; urgency=medium
+
+  * Add cherry-pick of commits b859e0a, f1cea98, 3cc296c, 70ce1a2, 
+    0423186 and 9e18e42 that were missed between 1.5.7-5 and 1.5.8-1
+    (Closes: #793485)
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Mon, 27 Jul 2015 16:23:48 +0200
+
+makedumpfile (1:1.5.8-3) sid; urgency=medium
+
+  * Makes sysVinit script execution contitional to the 
+    use of upstart. Closes: 789058
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Wed, 17 Jun 2015 15:10:42 +0200
+
+makedumpfile (1:1.5.8-2) sid; urgency=medium
+
+  * Add upstart job for systems supporting upstart
+   Closes: 788313
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Tue, 09 Jun 2015 11:11:02 +0200
+
+makedumpfile (1:1.5.8-1) sid; urgency=medium
+
+  * New upstream version includes :
+    o Fair I/O workload assignment for --split
+    - Add the new option "--splitblock-size" to specify the permissible
+      difference of each splitted dumpfile size. Please note that the
+      difference can be larger than the specified size since this feature
+      doesn't care about zero page filtering.
+
+    o Make incomplete dumpfile readable
+    - DUMP_DH_COMPRESSED_INCOMPLETE or DUMP_ELF_INCOMPLETE flag will be set
+      in the header of dumpfiles if ENOSPC occurs. The flags make crash utility
+      attempt analyzing the dumpfile even it is known to be incomplete.
+
+    o Support new kernels
+    - The supported kernel is updated to 3.19 in this version.
+ 
+    Changelog:
+    o New feature
+         - [PATCH v2] Get MODULES_VADDR by KERNEL_IMAGE_SIZE for x86_64. 
+           (by Baoquan He) 56649f7
+         - [PATCH v4 1/4] Make get_elf64_phdr()/get_elf32_phdr() public. 
+           (by Wang Xiao) 3182be9
+         - [PATCH v4 2/4] Make the incomplete dumpfile generated by ENOSPC 
+           error analyzable.
+           (by Wang Xiao) e39216f
+         - [PATCH v4 3/4] Implementation of dealing with kdump-compressed 
+           dumpfile with ENOSPC error. (by Wang Xiao) 76025d3
+         - [PATCH v4 4/4] Fix reassemble_kdump_header(). 
+           (by Zhou Wenjian) 45a1885
+         - [PATCH v3] Enable --mem-usage for s390x. 
+           (by Michael Holzheu) 2e452d7
+         - [PATCH v5 1/5] Add support for splitblock. 
+           (by Zhou Wenjian) c7825d4
+         - [PATCH v5 2/5] Add tools for reading and writing from splitblock 
+           table.  (by Zhou Wenjian) 11dcbfe
+         - [PATCH v5 3/5] Add module of generating table.
+           (by Zhou Wenjian) 28e367c
+         - [PATCH v5 4/5] Add module of calculating start_pfn and end_pfn in 
+           each dumpfile.
+           (by Zhou Wenjian) 2b74c02
+         - [PATCH v5 5/5] Add support for --splitblock-size. 
+           (by Zhou Wenjian) 3352179
+         - [PATCH] sadump: Support more than 16TB physical memory space. 
+           (by HATAYAMA Daisuke) 37afcd5
+     
+     o Bugfix
+         - [PATCH] Use file offset in initialize_mmap().
+           (by Petr Tesarik) f822608
+     
+     o Cleanup
+         - [PATCH] Initialize symbols early for old kernels. 
+           (by Atsushi Kumagai) 99850a1
+         - [PATCH v2] Introduce stub method for machine dependent parts. 
+           (by Atsushi Kumagai) bf0bbf9
+         - [PATCH] Read vmcoreinfo as early as possible. 
+           (by Atsushi Kumagai) 21631da
+         - [PATCH] Bring get_kcore_dump_loads() backward. 
+           (by Atsushi Kumagai) c1d9e15
+         - [PATCH 1/2] Add description of elf dump file. 
+           (by Zhou Wenjian) 4074bb6
+         - [PATCH 2/2] Add description of incomplete dump file. 
+           (by Zhou Wenjian) b343067
+         - [PATCH] Cleanup: Add some comments for ELF format. 
+           (by Atsushi Kumagai) 4a59bd6
+         - [PATCH 1/2] Modify the description of the dump level. 
+           (by Atsushi Kumagai) 3599df6
+         - [PATCH 2/2] Change the part of the pfn counter for page cache. 
+           (by Atsushi Kumagai) 7b55569
+         - [PATCH v3 1/7] cache: get rid of search loop in cache_add(). 
+           (by Petr Tesarik) e068ea2
+         - [PATCH v3 2/7] cache: allow to return a page to the pool. 
+           (by Petr Tesarik) f2b30c6
+         - [PATCH v3 3/7] cache: do not allocate from the pending list. 
+           (by Petr Tesarik) ff592e6
+         - [PATCH v3 4/7] cache: add hit/miss statistics to the final report.  
+           (by Petr Tesarik) 7405a60
+         - [PATCH v3 5/7] cache: allocate buffers in one big chunk. 
+           (by Petr Tesarik) 65899d0
+         - [PATCH v3 6/7] cache: allow arbitrary size of cache entries. 
+           (by Petr Tesarik) 5881f23
+         - [PATCH v3 7/7] cache: store mapped regions directly in the cache.  
+           (by Petr Tesarik) 1acd75f
+         - [PATCH] Update email addresses of mainteners. 
+           (by Atsushi Kumagai) febff05
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Tue, 28 Apr 2015 11:38:27 +0200
+
+makedumpfile (1:1.5.7-4) experimental; urgency=medium
+
+  * Enable kdump-tools to work as a systemd service
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Thu, 04 Dec 2014 17:45:43 +0100
+
+makedumpfile (1.5.7-3) unstable; urgency=medium
+
+  [Mauricio Faria de Oliveira <mauricfo@linux.vnet.ibm.com>]
+  * Add possibility to find vmlinux for ppc64el arch
+    Closes: #763688
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Fri, 14 Nov 2014 15:56:15 +0100
+
+makedumpfile (1.5.7-2) unstable; urgency=medium
+
+  [Lee Schermerhorn]
+  * Add '-F' [flatten] to makedumpefile args for remote kdump vi ssh.
+    Closes: #768317
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Mon, 10 Nov 2014 16:51:04 +0100
+
+makedumpfile (1.5.7-1) unstable; urgency=medium
+
+  * New upstream version includes :
+    - Show the memory usage of 1st kernel : Add the new option 
+      "--mem-usage" to show the memory usage at a given moment 
+      in 1st kernel. This will be helpful to estimate the 
+      appropriate storage size to store a filtered dumpfile,
+      thanks Baoquan.
+
+    -  hugepage filtering : Both THPs and hugetlbfs pages are now 
+       excluded as user pages.  As for hugetlbfs, this feature 
+       will be enabled for linux-3.16 or later.
+
+    -  Support new kernels
+       The supported kernel is updated to 3.16 in this version.
+
+  * Debian specific enhancements :
+    - Networked kernel dumps
+      The kdump-tools script is now able to send the output of
+      makedumpfile to a remote server using either SSH or NFS
+      protocols.
+    - Add myself as the new maintainer
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Thu, 18 Sep 2014 13:21:55 +0200
+
+makedumpfile (1.5.6-2) unstable; urgency=medium
+
+  * [ Juerg Haefliger <juerg.haefliger@hp.com> ]
+    Make the dumping of dmesg configurable
+
+    Dumping the dmesg buffer has shown to be problematic when kernels
+    change. This patch introduces a new config variable that can turn
+    the dmesg dump off.  The default behaviour unchanged, i.e., the
+    dmesg buffer is dumped.
+    Closes: 747173
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Fri, 23 May 2014 12:33:24 +0200
+
+makedumpfile (1.5.6-1) unstable; urgency=medium
+
+  [ Louis Bouchard ]
+  * New upstream version
+
+  * Add x32 armel armhf and ppa64el to Achitecture to close the delta with
+    Ubuntu
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Tue, 29 Apr 2014 16:07:03 +0200
+
+makedumpfile (1.5.5-2) unstable; urgency=low
+
+  * Drop debug kernel requirement from kdump-config
+
+    [Konstantin Khlebnikov]
+    Starting from 2.6.24 kernel provides vmcoreinfo right in vmcore,
+    so makedumpfile can produce filtered dumps without vmlinux or slecial vmcoreinfo.
+    Closes: #638849
+
+  * debian/kdump-config : Define Timestamp only once in variable and reuse
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Wed, 15 Jan 2014 10:29:34 +0100
+
+makedumpfile (1.5.5-1) unstable; urgency=low
+
+  [ Louis Bouchard ]
+  * New upstream version
+    - Reworked debian/patches to use DEP3
+    - Use install statement from upstream Makefile
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Thu, 19 Dec 2013 11:31:10 +0100
+
+makedumpfile (1.5.4-1) unstable; urgency=low
+
+  [Louis Bouchard]
+  * New upstream version
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Tue, 16 Jul 2013 16:05:09 +0200
+
+makedumpfile (1.5.3-1) unstable; urgency=low
+
+  [ Louis Bouchard ]
+  * New upstream version
+    - Drop 0003-PATCH-dump-dmesg-fix-for-post-3.5-kernels.patch
+      (included upstream)
+    - Rebase 0002-Use-install-instead-of-cp-in-Makefile.patch
+
+ -- John Wright <jsw@debian.org>  Sun, 31 Mar 2013 20:45:37 -0700
+
+makedumpfile (1.5.1-1) unstable; urgency=low
+
+  * Merge of new upstream version 1.5.1
+  * Add --dmesg-fix from upstream 1.5.2 for kernels 3.5
+    and above
+  * Add creation of /var/crash/dmesg.{timestamp} by kdump-config
+
+ -- Louis Bouchard <louis.bouchard@canonical.com>  Tue, 05 Feb 2013 09:55:43 +0100
+
+makedumpfile (1.5.0-1) unstable; urgency=low
+
+  * New upstream version 1.5.0
+
+ -- Louis Bouchard <louis.bouchard@ubuntu.com>  Mon, 17 Sep 2012 15:55:39 +0200
+
+makedumpfile (1.4.4-1) unstable; urgency=low
+
+  * New upstream version
+
+ -- John Wright <jsw@debian.org>  Mon, 16 Jul 2012 04:01:21 -0600
+
+makedumpfile (1.4.3-1) unstable; urgency=low
+
+  [ Louis Bouchard ]
+  * Update packaging for upstream version 1.4.3
+
+  [ John Wright ]
+  * Add Louis Bouchard to Uploaders.  Thanks!
+
+ -- John Wright <jsw@debian.org>  Sun, 10 Jun 2012 00:34:07 -0700
+
+makedumpfile (1.4.0-1) unstable; urgency=low
+
+  * New upstream version
+  * Drop makedumpfile-static package, since makedumpfile depends on
+    libebl, which is no longer available statically, and nobody is
+    depending on makedumpfile-static anyway
+
+ -- John Wright <jsw@debian.org>  Sun, 22 Jan 2012 16:49:51 -0800
+
+makedumpfile (1.3.7-2) unstable; urgency=low
+
+  * Cherry-pick upstream commits:
+    - [PATCH] BUGFIX: Avoid SIGSEGV when specifying -V option.
+      (5b8c2da75cbdb230019a3b956793fb768055b977)
+    - [PATCH] Copy correct nr_cpus info to dumpfile during re-filtering.
+      (c4f1c98a9827c1c0e41772c1954940fbf1b48048)
+  * kdump-tools.init: Don't exit with failure status except for bad
+    usage.  This way, even if /etc/default/kdump-tools has USE_KDUMP=1
+    but the kernel command line or debug kernels are not set up,
+    installation of a new version of the package will not leave it
+    unconfigured.  (Closes: #623470)
+
+ -- John Wright <jsw@debian.org>  Tue, 26 Apr 2011 20:05:16 -0700
+
+makedumpfile (1.3.7-1) unstable; urgency=low
+
+  [ John Wright ]
+  * New upstream version
+  * kdump-config: Clean up kernel command-line argument stripping
+  * kdump-tools.init: Remove a stray "$" in the usage statement
+    (Closes: #581116)
+
+  [ dave medberry ]
+  * kdump-config: Convert 3 log_failure_msg to a log_warning_msg
+    (Closes: #594411)
+
+ -- John Wright <jsw@debian.org>  Sun, 17 Apr 2011 21:03:04 -0700
+
+makedumpfile (1.3.5-1) unstable; urgency=low
+
+  * New upstream version
+  * Preserve upstream's original makedumpfile.8 in clean target
+  * kdump-config: Fix a typo
+  * Switch to the "3.0 (quilt)" source format
+    - Remove unneeded Build-Depends on quilt
+  * Update kdump-tools.README.Debian to reflect that recent kernels
+    don't need a crash kernel start address
+  * Apply patch from Petter Reinholdtsen to fix incorrect dependencies
+    in kdump-tools.init (Closes: #569685)
+  * Indicate support for Linux 2.6.32
+    - Although upstream hasn't updated its LATEST_VERSION macro, this
+      version works without modification on Linux 2.6.32.  Squelch a
+      warning that a 2.6.32 kernel is not supported.
+  * Backport upstream commit 4a16bd39866093f4949f8e9dc183fa2321bda22d
+    - Fix buffer overflow when writing dh->signature
+
+ -- John Wright <jsw@debian.org>  Wed, 03 Mar 2010 17:17:35 -0700
+
+makedumpfile (1.3.4-1) unstable; urgency=low
+
+  * New upstream version.
+    - Remove debian/patches/02-Add_x86_64_linux-2.6.31.patch - already
+      included upstream
+  * Upload to Debian. Changes from Ubuntu:
+    - Switch to quilt from dpatch
+    - Set myself as the maintainer
+    - Don't ignore make clean errors
+    - Update to debhelper compatibility level 7 and simplify the rules
+      file by using dh
+    - Install the manpage with maximum compression
+    - Update Standards-Version to 3.8.2, adding a README.source
+      explaining the quilt patch setup
+    - Add ${perl:Depends} to Depends, since we ship a perl script
+    - Add Vcs-Git and Vcs-Browser fields to debian/control
+    - Clarify the copyright description
+    - Provide a dynamically linked binary in the makedumpfile package,
+      and a static binary in the makedumpfile-static package
+      - Add lintian overrides relating to makedumpfile-static being
+        statically linked
+    - Remove unused Build-Depends on zip
+    - Build a kdump-tools package that includes an init script and tools
+      to configure kdump
+
+ -- John Wright <jsw@debian.org>  Thu, 12 Nov 2009 19:03:18 -0700
+
+makedumpfile (1.3.3-0ubuntu4) karmic; urgency=low
+
+  * debian/patches/02-Add_x86_64_linux-2.6.31.patch:
+    - apply patch by Ken'ichi Ohmichi to support 2.6.31 on
+      amd64 (kernel memory layout changed)
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 16 Jul 2009 09:18:33 +0200
+
+makedumpfile (1.3.3-0ubuntu3) karmic; urgency=low
+
+  * debian/rules, debian/control:
+    - add dpatch
+  * debian/patches/01_fix_makefile:
+    - fix make install target
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Tue, 23 Jun 2009 13:14:10 +0200
+
+makedumpfile (1.3.3-0ubuntu2) karmic; urgency=low
+
+  * fix FTBFS due to missing man dir
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Tue, 23 Jun 2009 09:21:08 +0200
+
+makedumpfile (1.3.3-0ubuntu1) karmic; urgency=low
+
+  * New upstream release
+  * depends on latest libdw-dev (the previous version does
+    not ship the required static lib)
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Mon, 22 Jun 2009 16:19:42 +0200
+
+makedumpfile (1.2.9-0ubuntu3) intrepid; urgency=low
+
+  * Add missing build dependency "zip" to fix FTBFS.
+
+ -- Martin Pitt <martin.pitt@ubuntu.com>  Wed, 08 Oct 2008 15:11:25 +0200
+
+makedumpfile (1.2.9-0ubuntu2) intrepid; urgency=low
+
+  * Corrected FTBFS caused by a mistake in the makefile
+
+ -- Michael Casadevall <sonicmctails@gmail.com>  Mon, 06 Oct 2008 02:01:26 -0400
+
+makedumpfile (1.2.9-0ubuntu1) intrepid; urgency=low
+
+  * New upstream version (LP: #271956)
+  * Support ia64 discontigmem kernels of linux-2.6.20+.
+  * Support x86_64 linux-2.6.27 kernel.
+  * Add "--vtop" option for debugging.
+  * Add the debugging message for ia64 pgtable.
+  * Get information from vmcoreinfo of /proc/vmcore even if -x/-i option.
+  * Add free() for error handling.
+  * Fix NOT_FOUND value of SIZE(nodemask_t).
+  * Use the terminal sizes of 80 for the IMPLEMENTATION file. (Bernhard Walle)
+  * Use static allocation instead of malloc().
+  * Add get_num_dumpable() function.
+  * Remove the unused pointer.
+  * Remove the unused code.
+  * Make the ELF methods simple.
+  * Merge the same code in write_elf_pages().
+  * Add "void" to some arguments.
+  * Separate the dependency code to machine and linux version.
+  * Cleanup vaddr_to_paddr() function.
+
+ -- Kevin Worth <kworth@gmail.com>  Thu, 18 Sep 2008 10:34:45 -0700
+
+makedumpfile (1.2.6-0ubuntu3) intrepid; urgency=low
+
+  * Added lpia to architectures.
+
+ -- Ben Collins <ben.collins@canonical.com>  Tue, 08 Jul 2008 10:51:37 -0400
+
+makedumpfile (1.2.6-0ubuntu2) intrepid; urgency=low
+
+  * Get rid of prerm and postinst from packaging, they were empty.
+  * Added copyright for packaging.
+  * Added copyright for ppc64.c to debian/copyright
+  * Check return value of read(), gets rid of warnings.
+
+ -- Ben Collins <ben.collins@canonical.com>  Wed, 02 Jul 2008 09:18:36 -0400
+
+makedumpfile (1.2.6-0ubuntu1) intrepid; urgency=low
+
+  * Initial release
+  * Use _LARGEFILE_SOURCE and _LARGEFILE64_SOURCE instead of
+    _FILE_OFFSET_BITS=64 for correct compilation.
+  * Added initramfs hook to install makedumpfile into initrd
+
+ -- Ben Collins <ben.collins@canonical.com>  Wed, 18 Jun 2008 18:15:32 -0400
+
