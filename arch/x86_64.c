@@ -15,10 +15,12 @@
  */
 #ifdef __x86_64__
 
-#include "makedumpfile.h"
+#include "../print_info.h"
+#include "../elf_info.h"
+#include "../makedumpfile.h"
 
 int
-is_vmalloc_addr(ulong vaddr)
+is_vmalloc_addr_x86_64(ulong vaddr)
 {
 	/*
 	 *  vmalloc, virtual memmap, and module space as VMALLOC space.
@@ -28,24 +30,36 @@ is_vmalloc_addr(ulong vaddr)
 	    || (vaddr >= MODULES_VADDR && vaddr <= MODULES_END));
 }
 
+static unsigned long
+get_xen_p2m_mfn(void)
+{
+	if (info->xen_crash_info_v >= 2)
+		return info->xen_crash_info.v2->
+			dom0_pfn_to_mfn_frame_list_list;
+	if (info->xen_crash_info_v >= 1)
+		return info->xen_crash_info.v1->
+			dom0_pfn_to_mfn_frame_list_list;
+	return NOT_FOUND_LONG_VALUE;
+}
+
 int
 get_phys_base_x86_64(void)
 {
 	int i;
-	struct pt_load_segment *pls;
+	unsigned long long phys_start;
+	unsigned long long virt_start;
 
 	/*
 	 * Get the relocatable offset
 	 */
 	info->phys_base = 0; /* default/traditional */
 
-	for (i = 0; i < info->num_load_memory; i++) {
-		pls = &info->pt_load_segments[i];
-		if ((pls->virt_start >= __START_KERNEL_map) &&
-		    !(is_vmalloc_addr(pls->virt_start))) {
+	for (i = 0; get_pt_load(i, &phys_start, NULL, &virt_start, NULL); i++) {
+		if ((virt_start >= __START_KERNEL_map) &&
+		    !(is_vmalloc_addr_x86_64(virt_start))) {
 
-			info->phys_base = pls->phys_start -
-			    (pls->virt_start & ~(__START_KERNEL_map));
+			info->phys_base = phys_start -
+			    (virt_start & ~(__START_KERNEL_map));
 
 			break;
 		}
@@ -57,22 +71,28 @@ get_phys_base_x86_64(void)
 int
 get_machdep_info_x86_64(void)
 {
+	unsigned long p2m_mfn;
 	int i, j, mfns[MAX_X86_64_FRAMES];
 	unsigned long frame_mfn[MAX_X86_64_FRAMES];
 	unsigned long buf[MFNS_PER_FRAME];
 
 	info->section_size_bits = _SECTION_SIZE_BITS;
 
-	if (!(vt.mem_flags & MEMORY_XEN))
+	if (!is_xen_memory())
 		return TRUE;
 
 	/*
 	 * Get the information for translating domain-0's physical
 	 * address into machine address.
 	 */
-	if (!readmem(MADDR_XEN, pfn_to_paddr(info->p2m_mfn),
-					 &frame_mfn, PAGESIZE())) {
-		ERRMSG("Can't get p2m_mfn.\n");
+	p2m_mfn = get_xen_p2m_mfn();
+	if (p2m_mfn == (unsigned long)NOT_FOUND_LONG_VALUE) {
+		ERRMSG("Can't get p2m_mfn address.\n");
+		return FALSE;
+	}
+	if (!readmem(MADDR_XEN, pfn_to_paddr(p2m_mfn),
+		     &frame_mfn, PAGESIZE())) {
+		ERRMSG("Can't read p2m_mfn.\n");
 		return FALSE;
 	}
 
@@ -191,7 +211,7 @@ vtop4_x86_64(unsigned long vaddr)
 	/*
 	 * Get PUD.
 	 */
-	pgd_paddr  = pml4 & PHYSICAL_PAGE_MASK;
+	pgd_paddr  = pml4 & ENTRY_MASK;
 	pgd_paddr += pgd_index(vaddr) * sizeof(unsigned long);
 	if (!readmem(PADDR, pgd_paddr, &pgd_pte, sizeof pgd_pte)) {
 		ERRMSG("Can't get pgd_pte (pgd_paddr:%lx).\n", pgd_paddr);
@@ -204,11 +224,14 @@ vtop4_x86_64(unsigned long vaddr)
 		ERRMSG("Can't get a valid pgd_pte.\n");
 		return NOT_PADDR;
 	}
+	if (pgd_pte & _PAGE_PSE)	/* 1GB pages */
+		return (pgd_pte & ENTRY_MASK & PGDIR_MASK) +
+			(vaddr & ~PGDIR_MASK);
 
 	/*
 	 * Get PMD.
 	 */
-	pmd_paddr  = pgd_pte & PHYSICAL_PAGE_MASK;
+	pmd_paddr  = pgd_pte & ENTRY_MASK;
 	pmd_paddr += pmd_index(vaddr) * sizeof(unsigned long);
 	if (!readmem(PADDR, pmd_paddr, &pmd_pte, sizeof pmd_pte)) {
 		ERRMSG("Can't get pmd_pte (pmd_paddr:%lx).\n", pmd_paddr);
@@ -221,14 +244,14 @@ vtop4_x86_64(unsigned long vaddr)
 		ERRMSG("Can't get a valid pmd_pte.\n");
 		return NOT_PADDR;
 	}
-	if (pmd_pte & _PAGE_PSE)
-		return (PAGEBASE(pmd_pte) & PHYSICAL_PAGE_MASK)
-			+ (vaddr & ~_2MB_PAGE_MASK);
+	if (pmd_pte & _PAGE_PSE)	/* 2MB pages */
+		return (pmd_pte & ENTRY_MASK & PMD_MASK) +
+			(vaddr & ~PMD_MASK);
 
 	/*
 	 * Get PTE.
 	 */
-	pte_paddr  = pmd_pte & PHYSICAL_PAGE_MASK;
+	pte_paddr  = pmd_pte & ENTRY_MASK;
 	pte_paddr += pte_index(vaddr) * sizeof(unsigned long);
 	if (!readmem(PADDR, pte_paddr, &pte, sizeof pte)) {
 		ERRMSG("Can't get pte (pte_paddr:%lx).\n", pte_paddr);
@@ -241,7 +264,7 @@ vtop4_x86_64(unsigned long vaddr)
 		ERRMSG("Can't get a valid pte.\n");
 		return NOT_PADDR;
 	}
-	return (PAGEBASE(pte) & PHYSICAL_PAGE_MASK) + PAGEOFFSET(vaddr);
+	return (pte & ENTRY_MASK) + PAGEOFFSET(vaddr);
 }
 
 unsigned long long
@@ -258,7 +281,7 @@ vaddr_to_paddr_x86_64(unsigned long vaddr)
 	else
 		phys_base = 0;
 
-	if (is_vmalloc_addr(vaddr)) {
+	if (is_vmalloc_addr_x86_64(vaddr)) {
 		if ((paddr = vtop4_x86_64(vaddr)) == NOT_PADDR) {
 			ERRMSG("Can't convert a virtual address(%lx) to " \
 			    "physical address.\n", vaddr);
@@ -268,7 +291,7 @@ vaddr_to_paddr_x86_64(unsigned long vaddr)
 		paddr = vaddr - __START_KERNEL_map + phys_base;
 
 	} else {
-		if (vt.mem_flags & MEMORY_XEN)
+		if (is_xen_memory())
 			paddr = vaddr - PAGE_OFFSET_XEN_DOM0;
 		else
 			paddr = vaddr - PAGE_OFFSET;
@@ -310,6 +333,10 @@ kvtop_xen_x86_64(unsigned long kvaddr)
 	if (!(entry & _PAGE_PRESENT))
 		return NOT_PADDR;
 
+	if (entry & _PAGE_PSE)		/* 1GB pages */
+		return (entry & ENTRY_MASK & PGDIR_MASK) +
+			(kvaddr & ~PGDIR_MASK);
+
 	dirp = entry & ENTRY_MASK;
 	dirp += pmd_index(kvaddr) * sizeof(unsigned long long);
 	if (!readmem(MADDR_XEN, dirp, &entry, sizeof(entry)))
@@ -318,10 +345,10 @@ kvtop_xen_x86_64(unsigned long kvaddr)
 	if (!(entry & _PAGE_PRESENT))
 		return NOT_PADDR;
 
-	if (entry & _PAGE_PSE) {
-		entry = (entry & ENTRY_MASK) + (kvaddr & ((1UL << PMD_SHIFT) - 1));
-		return entry;
-	}
+	if (entry & _PAGE_PSE)		/* 2MB pages */
+		return (entry & ENTRY_MASK & PMD_MASK) +
+			(kvaddr & ~PMD_MASK);
+
 	dirp = entry & ENTRY_MASK;
 	dirp += pte_index(kvaddr) * sizeof(unsigned long long);
 	if (!readmem(MADDR_XEN, dirp, &entry, sizeof(entry)))
@@ -331,51 +358,103 @@ kvtop_xen_x86_64(unsigned long kvaddr)
 		return NOT_PADDR;
 	}
 
-	entry = (entry & ENTRY_MASK) + (kvaddr & ((1UL << PTE_SHIFT) - 1));
-
-	return entry;
+	return (entry & ENTRY_MASK) + PAGEOFFSET(kvaddr);
 }
 
-int get_xen_info_x86_64(void)
+int get_xen_basic_info_x86_64(void)
 {
-	unsigned long frame_table_vaddr;
-	unsigned long xen_end;
-	int i;
+ 	if (!info->xen_phys_start) {
+		if (info->xen_crash_info_v < 2) {
+			ERRMSG("Can't get Xen physical start address.\n"
+			       "Please use the --xen_phys_start option.");
+			return FALSE;
+		}
+		info->xen_phys_start = info->xen_crash_info.v2->xen_phys_start;
+	}
+
+	info->xen_virt_start = SYMBOL(domain_list);
+
+	/*
+	 * Xen virtual mapping is aligned to 1 GiB boundary.
+	 * domain_list lives in bss which sits no more than
+	 * 1 GiB below beginning of virtual address space.
+	 */
+	info->xen_virt_start &= 0xffffffffc0000000;
+
+	if (info->xen_crash_info.com &&
+	    info->xen_crash_info.com->xen_major_version >= 4)
+		info->directmap_virt_end = DIRECTMAP_VIRT_END_V4;
+	else
+		info->directmap_virt_end = DIRECTMAP_VIRT_END_V3;
 
 	if (SYMBOL(pgd_l4) == NOT_FOUND_SYMBOL) {
 		ERRMSG("Can't get pml4.\n");
 		return FALSE;
 	}
 
-	if (SYMBOL(frame_table) == NOT_FOUND_SYMBOL) {
-		ERRMSG("Can't get the symbol of frame_table.\n");
-		return FALSE;
-	}
-	if (!readmem(VADDR_XEN, SYMBOL(frame_table), &frame_table_vaddr,
-	    sizeof(frame_table_vaddr))) {
-		ERRMSG("Can't get the value of frame_table.\n");
-		return FALSE;
-	}
-	info->frame_table_vaddr = frame_table_vaddr;
+	if (SYMBOL(frame_table) != NOT_FOUND_SYMBOL) {
+		unsigned long frame_table_vaddr;
 
-	if (SYMBOL(xenheap_phys_end) == NOT_FOUND_SYMBOL) {
-		ERRMSG("Can't get the symbol of xenheap_phys_end.\n");
-		return FALSE;
+		if (!readmem(VADDR_XEN, SYMBOL(frame_table),
+			     &frame_table_vaddr, sizeof(frame_table_vaddr))) {
+			ERRMSG("Can't get the value of frame_table.\n");
+			return FALSE;
+		}
+		info->frame_table_vaddr = frame_table_vaddr;
+	} else {
+		if (info->xen_crash_info.com &&
+		    ((info->xen_crash_info.com->xen_major_version == 4 &&
+		      info->xen_crash_info.com->xen_minor_version >= 3) ||
+		      info->xen_crash_info.com->xen_major_version > 4))
+			info->frame_table_vaddr = FRAMETABLE_VIRT_START_V4_3;
+		else
+			info->frame_table_vaddr = FRAMETABLE_VIRT_START_V3;
 	}
-	if (!readmem(VADDR_XEN, SYMBOL(xenheap_phys_end), &xen_end,
-	    sizeof(xen_end))) {
-		ERRMSG("Can't get the value of xenheap_phys_end.\n");
-		return FALSE;
-	}
-	info->xen_heap_start = 0;
-	info->xen_heap_end   = paddr_to_pfn(xen_end);
 
-	/*
-	 * pickled_id == domain addr for x86_64
-	 */
-	for (i = 0; i < info->num_domain; i++) {
-		info->domain_list[i].pickled_id =
-			info->domain_list[i].domain_addr;
+	if (!info->xen_crash_info.com ||
+	    info->xen_crash_info.com->xen_major_version < 4) {
+		unsigned long xen_end;
+
+		if (SYMBOL(xenheap_phys_end) == NOT_FOUND_SYMBOL) {
+			ERRMSG("Can't get the symbol of xenheap_phys_end.\n");
+			return FALSE;
+		}
+		if (!readmem(VADDR_XEN, SYMBOL(xenheap_phys_end), &xen_end,
+			     sizeof(xen_end))) {
+			ERRMSG("Can't get the value of xenheap_phys_end.\n");
+			return FALSE;
+		}
+		info->xen_heap_start = 0;
+		info->xen_heap_end   = paddr_to_pfn(xen_end);
+	}
+
+	return TRUE;
+}
+
+int get_xen_info_x86_64(void)
+{
+	int i;
+
+	if (info->xen_crash_info.com &&
+	    (info->xen_crash_info.com->xen_major_version >= 4 ||
+	     (info->xen_crash_info.com->xen_major_version == 3 &&
+	      info->xen_crash_info.com->xen_minor_version >= 4))) {
+		/*
+		 * cf. changeset 0858f961c77a
+		 */
+		for (i = 0; i < info->num_domain; i++) {
+			info->domain_list[i].pickled_id =
+				(info->domain_list[i].domain_addr -
+				 DIRECTMAP_VIRT_START) >> PAGESHIFT();
+		}
+	} else {
+		/*
+		 * pickled_id == domain addr for x86_64
+		 */
+		for (i = 0; i < info->num_domain; i++) {
+			info->domain_list[i].pickled_id =
+				info->domain_list[i].domain_addr;
+		}
 	}
 
 	return TRUE;
