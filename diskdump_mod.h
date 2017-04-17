@@ -13,12 +13,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
+#ifndef _DISKDUMP_MOD_H
+#define _DISKDUMP_MOD_H
 
 #include <elf.h>
-
-#define divideup(x, y)	(((x) + ((y) - 1)) / (y))
-#define round(x, y)	(((x) / (y)) * (y))
-#define roundup(x, y)	((((x) + ((y) - 1)) / (y)) * (y))
 
 #define DUMP_PARTITION_SIGNATURE	"diskdump"
 #define DISK_DUMP_SIGNATURE		"DISKDUMP"
@@ -26,17 +24,21 @@
 #define SIG_LEN (sizeof(DUMP_PARTITION_SIGNATURE) - 1)
 #define DISKDUMP_HEADER_BLOCKS		(1)
 
+/*
+ * These are all remnants of the old "diskdump" facility,
+ * none of them are ever used by makedumpfile.
+ */
 #define DUMP_HEADER_COMPLETED	0
 #define DUMP_HEADER_INCOMPLETED 1
 #define DUMP_HEADER_COMPRESSED  8
 
 struct new_utsname {
-        char sysname[65];
-        char nodename[65];
-        char release[65];
-        char version[65];
-        char machine[65];
-        char domainname[65];
+	char sysname[65];
+	char nodename[65];
+	char release[65];
+	char version[65];
+	char machine[65];
+	char domainname[65];
 };
 
 struct disk_dump_header {
@@ -50,7 +52,9 @@ struct disk_dump_header {
 						   header in blocks */
 	unsigned int		bitmap_blocks;	/* Size of Memory bitmap in
 						   block */
-	unsigned int		max_mapnr;	/* = max_mapnr */
+	unsigned int		max_mapnr;	/* = max_mapnr, OBSOLETE!
+						   32bit only, full 64bit
+						   in sub header. */
 	unsigned int		total_ram_blocks;/* Number of blocks should be
 						   written */
 	unsigned int		device_blocks;	/* Number of total blocks in
@@ -69,14 +73,31 @@ struct kdump_sub_header {
 	unsigned long	phys_base;
 	int		dump_level;	/* header_version 1 and later */
 	int		split;		/* header_version 2 and later */
-	unsigned long	start_pfn;	/* header_version 2 and later */
-	unsigned long	end_pfn;	/* header_version 2 and later */
+	unsigned long	start_pfn;	/* header_version 2 and later,
+					   OBSOLETE! 32bit only, full
+					   64bit in start_pfn_64. */
+	unsigned long	end_pfn;	/* header_version 2 and later,
+					   OBSOLETE! 32bit only, full
+					   64bit in end_pfn_64. */
 	off_t		offset_vmcoreinfo;/* header_version 3 and later */
 	unsigned long	size_vmcoreinfo;  /* header_version 3 and later */
+	off_t		offset_note;      /* header_version 4 and later */
+	unsigned long	size_note;        /* header_version 4 and later */
+	off_t		offset_eraseinfo; /* header_version 5 and later */
+	unsigned long	size_eraseinfo;   /* header_version 5 and later */
+	unsigned long long start_pfn_64;  /* header_version 6 and later */
+	unsigned long long end_pfn_64;	  /* header_version 6 and later */
+	unsigned long long max_mapnr_64;  /* header_version 6 and later */
 };
 
 /* page flags */
-#define DUMP_DH_COMPRESSED	0x1	/* page is compressed               */
+#define DUMP_DH_COMPRESSED_ZLIB	0x1	/* page is compressed with zlib */
+#define DUMP_DH_COMPRESSED_LZO	0x2	/* paged is compressed with lzo */
+#define DUMP_DH_COMPRESSED_SNAPPY	0x4
+					/* paged is compressed with snappy */
+#define DUMP_DH_COMPRESSED_INCOMPLETE	0x8
+					/* indicate an incomplete dumpfile */
+#define DUMP_DH_EXCLUDED_VMEMMAP 0x10	/* unused vmemmap pages are excluded */
 
 /* descriptor of each page for vmcore */
 typedef struct page_desc {
@@ -89,4 +110,6 @@ typedef struct page_desc {
 #define DISKDUMP_CACHED_PAGES	(16)
 #define PAGE_VALID		(0x1)	/* flags */
 #define DISKDUMP_VALID_PAGE(flags)	((flags) & PAGE_VALID)
+
+#endif  /* DISKDUMP_MOD_H */
 
